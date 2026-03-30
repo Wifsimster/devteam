@@ -2106,7 +2106,11 @@
           .filter(Boolean)
           .map(ts => new Date(ts).getTime())
           .filter(t => !isNaN(t));
-        if (!candidates.length) return;
+        if (!candidates.length) {
+          _resetTargetTime = null;
+          updateResetDisplay();
+          return;
+        }
         _resetTargetTime = Math.max(...candidates);
         if (!_resetIntervalId) {
           _resetIntervalId = setInterval(updateResetDisplay, 1000);
