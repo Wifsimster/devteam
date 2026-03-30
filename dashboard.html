@@ -2091,11 +2091,17 @@
       let _resetTargetTime = null;
       let _resetIntervalId = null;
 
-      function startResetCountdown(isoTimestamp) {
-        if (!isoTimestamp) return;
-        _resetTargetTime = new Date(isoTimestamp).getTime();
-        if (_resetIntervalId) return; // already ticking
-        _resetIntervalId = setInterval(updateResetDisplay, 1000);
+      function startResetCountdown(reqReset, tokReset) {
+        // Pick the furthest reset time (the one that matters most)
+        const candidates = [reqReset, tokReset]
+          .filter(Boolean)
+          .map(ts => new Date(ts).getTime())
+          .filter(t => !isNaN(t));
+        if (!candidates.length) return;
+        _resetTargetTime = Math.max(...candidates);
+        if (!_resetIntervalId) {
+          _resetIntervalId = setInterval(updateResetDisplay, 1000);
+        }
         updateResetDisplay();
       }
 
@@ -2104,7 +2110,7 @@
         if (!_resetTargetTime) { el.textContent = '--:--'; return; }
         const diff = Math.max(0, _resetTargetTime - Date.now());
         if (diff === 0) {
-          el.textContent = 'maintenant';
+          el.textContent = '< 1m';
           return;
         }
         const h = Math.floor(diff / 3600000);
@@ -2138,9 +2144,8 @@
             const tokPct = updateUsageBar('tok', rl.tokens_remaining, rl.tokens_limit);
             maxPct = Math.max(reqPct, tokPct);
 
-            // Pick the nearest reset time
-            const resetIso = rl.requests_reset || rl.tokens_reset;
-            if (resetIso) startResetCountdown(resetIso);
+            // Update reset countdown with both timestamps
+            startResetCountdown(rl.requests_reset, rl.tokens_reset);
           }
 
           if (usage) {

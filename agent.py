@@ -51,7 +51,7 @@ _current_task = None
 _usage = {"total_cost_usd": 0, "total_turns": 0, "task_count": 0}
 _rate_limits_cache = None
 _rate_limits_ts = 0
-RATE_LIMITS_TTL = 60
+RATE_LIMITS_TTL = 30
 _history_cache = []
 HISTORY_FILE = os.path.join(WORKSPACE, ".devteam", "history.jsonl")
 
