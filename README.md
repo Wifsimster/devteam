@@ -1,71 +1,99 @@
 # Devteam
 
-Equipe de developpeurs IA autonome orchestree par un agent CEO (Jarvis). Pilotable depuis Discord `#dev` avec dashboard temps reel.
+Equipe de développeurs IA autonome pilotée par Discord. Envoyez une demande sur le canal `#dev`, Jarvis orchestre le travail et vous livre le résultat en temps réel.
 
-## Architecture
+## Table des matières
 
-```
-Discord #dev → discord-bridge → POST /task → Claude Code CLI (CEO Jarvis)
-                                                ├── Agent "Alice" (Frontend)
-                                                ├── Agent "Bob" (Backend)
-                                                └── Agent "Charlie" (DevOps)
+- [À quoi sert ce produit ?](#à-quoi-sert-ce-produit-)
+- [Fonctionnalités principales](#fonctionnalités-principales)
+- [Comment ça fonctionne](#comment-ça-fonctionne)
+- [Environnements](#environnements)
+- [Déploiement](#déploiement)
+- [Stack technique](#stack-technique)
+- [Documentation complémentaire](#documentation-complémentaire)
 
-Events → Discord thread (mobile) + Dashboard websocket (desktop)
-```
+### Documentation technique
 
-## Stack
+| Document | Description |
+|----------|-------------|
+| [Architecture](docs/architecture.md) | Flux de données, parsing du stream JSON, gestion de la concurrence |
+| [Intégration Discord](docs/discord-integration.md) | Threads, indicateur de frappe, découpage des messages, filtrage |
+| [Référence API](docs/api-reference.md) | Endpoints HTTP, événements WebSocket, formats de données |
 
-- **Runtime** : Claude Code CLI (Sonnet 4.6) — tool-calling natif (Read, Write, Edit, Bash, Git, Agent)
-- **Orchestration** : Agent CEO delegue aux sous-agents avec worktrees git isoles
-- **Backend** : Python aiohttp (HTTP server + WebSocket)
-- **Dashboard** : HTML/JS vanilla, websocket temps reel
-- **Container** : Node.js 22 + Python 3.12 + Claude Code CLI + git
+## À quoi sert ce produit ?
 
-## Services
+- **Déléguer des tâches de développement** en envoyant un simple message Discord
+- **Suivre l'avancement en temps réel** via un dashboard web ou le thread Discord
+- **Orchestrer plusieurs agents spécialisés** (frontend, backend, DevOps) automatiquement
+- **Travailler sur vos repos git** montés depuis le NAS, sans configuration manuelle
+- **Visualiser les actions des agents** (fichiers lus, modifiés, commandes exécutées)
 
-| Endpoint | Role |
-|----------|------|
-| `POST /task` | Recoit une tache depuis discord-bridge, lance Claude CLI en background |
-| `GET /health` | Status JSON (`idle` / `busy` + tache en cours) |
-| `GET /ws` | WebSocket temps reel (events, agents, timeline) |
-| `GET /` | Dashboard web |
+## Fonctionnalités principales
 
-## Discord
+- **Pilotage Discord** — Envoyez une demande sur `#dev`, un thread est créé automatiquement avec les mises à jour
+- **Dashboard temps réel** — Interface web avec timeline, état des agents et résultat final via WebSocket
+- **Agents spécialisés** — Alice (frontend), Bob (backend) et Charlie (DevOps) délégués selon le besoin
+- **Exécution sécurisée** — Container isolé avec limites mémoire et pas d'escalade de privilèges
+- **Suivi des coûts** — Nombre de tours et coût affiché à la fin de chaque tâche
 
-- **Canal** : `#dev` — envoie un message, Jarvis prend le relais
-- **Thread** : cree automatiquement par tache, updates en temps reel
-- **Reaction** : 🚀 = tache acceptee
+## Comment ça fonctionne
 
-## Deploiement
-
-```bash
-# Creer le .env
-cat > .env <<EOF
-DISCORD_BOT_TOKEN=<token>
-ANTHROPIC_API_KEY=<key>
-DOMAIN=battistella.ovh
-WORKSPACE=/workspace
-CLAUDE_MODEL=claude-sonnet-4-6
-MAX_TURNS=50
-EOF
-
-# Lancer
-docker compose up -d --build
+```mermaid
+graph LR
+    A[Utilisateur] -->|Message Discord| B[Discord Bridge]
+    B -->|POST /task| C[Agent Jarvis]
+    C -->|Délégation| D[Alice — Frontend]
+    C -->|Délégation| E[Bob — Backend]
+    C -->|Délégation| F[Charlie — DevOps]
+    C -->|Résultat| G[Thread Discord]
+    C -->|WebSocket| H[Dashboard Web]
 ```
 
-Le dashboard est accessible sur `https://devteam.<DOMAIN>/`.
+L'utilisateur envoie une demande sur Discord. Le bridge transmet la tâche à Jarvis via l'API. Jarvis analyse la demande, délègue aux agents spécialisés si nécessaire, puis publie le résultat dans le thread Discord et le dashboard.
 
-## Workspace
+## Environnements
 
-Les repos git a travailler sont montes dans `/workspace` (NAS Unraid via NFS). Chaque sous-repertoire est un repo independant. Les agents les detectent automatiquement.
+| Environnement | URL | Description |
+|---------------|-----|-------------|
+| Production | `https://devteam.<DOMAIN>/` | Dashboard web et API |
+| Dashboard | `https://devteam.<DOMAIN>/` | Interface de suivi temps réel |
+| API Health | `https://devteam.<DOMAIN>/health` | État du service (idle/busy) |
 
-## Personnalites
+## Déploiement
 
-Les personnalites des agents sont definies dans `prompts/` et dans le `CLAUDE.md` du workspace :
+```mermaid
+graph LR
+    A[Développeur] -->|docker compose up| B[Build Docker]
+    B -->|Node 22 + Python 3 + Claude CLI| C[Container dev-agents]
+    C -->|Port 8585| D[Traefik]
+    D -->|HTTPS| E[devteam.DOMAIN]
+    F[Watchtower] -->|Mise à jour auto| C
+```
 
-| Agent | Role | Personnalite |
-|-------|------|-------------|
-| **Jarvis** (CEO) | Orchestration, decomposition, review, merge | Strategique, decisif, autonome |
-| **Alice** | Frontend (React, Next.js, Tailwind) | Perfectionniste UX, mobile-first |
-| **Bob** | Backend (Node.js, Python, PostgreSQL) | Rigoureux, securite, simplicite |
-| **Charlie** | DevOps (Docker, CI/CD, infra) | Pragmatique, minimaliste |
+Le service se déploie via Docker Compose. Le conteneur inclut Node.js, Python et Claude Code CLI. Traefik gère le routage HTTPS. Watchtower assure les mises à jour automatiques.
+
+### Variables d'environnement requises
+
+Créez un fichier `.env` avec les variables suivantes :
+
+| Variable | Description |
+|----------|-------------|
+| `DISCORD_BOT_TOKEN` | Token du bot Discord |
+| `ANTHROPIC_API_KEY` | Clé API Anthropic |
+| `DOMAIN` | Domaine pour Traefik |
+| `CLAUDE_MODEL` | Modèle Claude (défaut : `claude-sonnet-4-6`) |
+| `MAX_TURNS` | Nombre max de tours par tâche (défaut : 50) |
+
+## Stack technique
+
+- **Orchestration :** Claude Code CLI (Sonnet 4.6), sous-agents avec worktrees git isolés
+- **Backend :** Python 3, aiohttp (serveur HTTP + WebSocket)
+- **Dashboard :** HTML/JS vanilla, WebSocket temps réel
+- **Infrastructure :** Docker, Traefik, Watchtower
+- **Intégration :** Discord Bot API (threads, typing indicator)
+
+## Documentation complémentaire
+
+- [Architecture](docs/architecture.md) — Flux de données, parsing du stream JSON, gestion de la concurrence
+- [Intégration Discord](docs/discord-integration.md) — Threads, indicateur de frappe, découpage des messages
+- [Référence API](docs/api-reference.md) — Endpoints HTTP, événements WebSocket, formats de données
