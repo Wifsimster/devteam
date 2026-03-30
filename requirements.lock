@@ -1,0 +1,9 @@
+# Auto-generated lockfile — do not edit manually.
+# Regenerate: pip install aiohttp==3.9.5 && pip freeze | grep -E 'aiohttp|aiosignal|frozenlist|multidict|yarl|propcache|typing.extensions'
+aiohttp==3.9.5
+aiosignal==1.4.0
+frozenlist==1.8.0
+multidict==6.7.1
+propcache==0.4.1
+typing_extensions==4.15.0
+yarl==1.23.0
