@@ -49,9 +49,6 @@ _task_lock = asyncio.Lock()
 _ws_clients = set()
 _current_task = None
 _usage = {"total_cost_usd": 0, "total_turns": 0, "task_count": 0}
-_rate_limits_cache = None
-_rate_limits_ts = 0
-RATE_LIMITS_TTL = 30
 _history_cache = []
 HISTORY_FILE = os.path.join(WORKSPACE, ".devteam", "history.jsonl")
 
@@ -82,6 +79,7 @@ _task_queue = []
 _queue_lock = asyncio.Lock()
 _queue_seq = count(1)
 _queue_worker_task = None
+_queue_event = asyncio.Event()
 
 
 def _normalize_priority(priority):
@@ -140,6 +138,7 @@ async def enqueue_task(channel_id, content, message_id, author, priority):
         save_queue_state()
 
     await _broadcast_queue_update()
+    _queue_event.set()
     return item, position
 
 
@@ -203,13 +202,21 @@ def load_queue_state():
 async def queue_worker():
     while True:
         try:
+            # Wait for a task to be enqueued (or check periodically for recovered state)
+            _queue_event.clear()
             if _task_lock.locked() or _current_task is not None:
-                await asyncio.sleep(0.2)
+                try:
+                    await asyncio.wait_for(_queue_event.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
                 continue
 
             next_item = await dequeue_next_task()
             if not next_item:
-                await asyncio.sleep(0.3)
+                try:
+                    await asyncio.wait_for(_queue_event.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
                 continue
 
             await _broadcast_queue_update()
@@ -589,9 +596,6 @@ def append_history(task):
 # --- Discord Helpers ---
 
 async def discord_request(method, path, json_body=None):
-    global _http_session
-    if _http_session is None or _http_session.closed:
-        _http_session = aiohttp.ClientSession()
     headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json",
@@ -671,12 +675,7 @@ TOOL_ICONS = {
 }
 
 
-async def parse_stream_line(line, task):
-    try:
-        data = json.loads(line)
-    except json.JSONDecodeError:
-        return
-
+async def parse_stream_line(data, task):
     event_type = data.get("type", "")
     now = datetime.now().strftime("%H:%M:%S")
 
@@ -803,14 +802,13 @@ async def run_claude_stream(prompt, task):
                 decoded = line.decode().strip()
                 if not decoded:
                     continue
-                await parse_stream_line(decoded, task)
-                # Capture result from stream
                 try:
                     data = json.loads(decoded)
-                    if data.get("type") == "result":
-                        final_result = data.get("result", "")
                 except json.JSONDecodeError:
-                    pass
+                    continue
+                await parse_stream_line(data, task)
+                if data.get("type") == "result":
+                    final_result = data.get("result", "")
 
             await proc.wait()
     except TimeoutError:
@@ -1153,78 +1151,22 @@ async def handle_dashboard(request):
     return web.Response(text=html, content_type="text/html")
 
 
-def _safe_int(v):
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return 0
-
-
-async def fetch_rate_limits():
-    """
-    Fetches real API rate limits from Anthropic, but returns usage limits
-    based on the current subscription plan (max plan used).
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return None
-
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
+def get_plan_limits():
+    """Return rate limits based on the current subscription plan with remaining computed from session usage."""
+    plan_limits = SUBSCRIPTION_PLANS.get(CURRENT_PLAN, SUBSCRIPTION_PLANS["pro"])
+    return {
+        "requests_limit": plan_limits["requests_limit"],
+        "requests_remaining": max(0, plan_limits["requests_limit"] - _usage["task_count"]),
+        "tokens_limit": plan_limits["tokens_limit"],
+        "tokens_remaining": max(0, plan_limits["tokens_limit"] - _usage["total_turns"] * 1000),
+        "input_tokens_limit": plan_limits["input_tokens_limit"],
+        "output_tokens_limit": plan_limits["output_tokens_limit"],
     }
-
-    body = {
-        "model": "claude-sonnet-4-6",
-        "max_tokens": 1,
-        "messages": [{"role": "user", "content": "."}],
-    }
-
-    try:
-        global _http_session
-        if _http_session is None or _http_session.closed:
-            _http_session = aiohttp.ClientSession()
-        async with _http_session.post(
-            "https://api.anthropic.com/v1/messages",
-            json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            h = resp.headers
-            api_limits = {
-                "requests_limit": _safe_int(h.get("anthropic-ratelimit-requests-limit")),
-                "requests_remaining": _safe_int(h.get("anthropic-ratelimit-requests-remaining")),
-                "requests_reset": h.get("anthropic-ratelimit-requests-reset", ""),
-                "tokens_limit": _safe_int(h.get("anthropic-ratelimit-tokens-limit")),
-                "tokens_remaining": _safe_int(h.get("anthropic-ratelimit-tokens-remaining")),
-                "tokens_reset": h.get("anthropic-ratelimit-tokens-reset", ""),
-                "input_tokens_limit": _safe_int(h.get("anthropic-ratelimit-input-tokens-limit")),
-                "input_tokens_remaining": _safe_int(h.get("anthropic-ratelimit-input-tokens-remaining")),
-                "output_tokens_limit": _safe_int(h.get("anthropic-ratelimit-output-tokens-limit")),
-                "output_tokens_remaining": _safe_int(h.get("anthropic-ratelimit-output-tokens-remaining")),
-            }
-            
-            plan_limits = SUBSCRIPTION_PLANS.get(CURRENT_PLAN, SUBSCRIPTION_PLANS["pro"])
-            api_limits["requests_limit"] = plan_limits["requests_limit"]
-            api_limits["tokens_limit"] = plan_limits["tokens_limit"]
-            api_limits["input_tokens_limit"] = plan_limits["input_tokens_limit"]
-            api_limits["output_tokens_limit"] = plan_limits["output_tokens_limit"]
-            
-            return api_limits
-    except Exception as e:
-        log.error(f"Rate limits fetch failed: {e}")
-        return None
 
 
 async def handle_usage(request):
-    global _rate_limits_cache, _rate_limits_ts
-
-    now = asyncio.get_event_loop().time()
-    if _rate_limits_cache is None or (now - _rate_limits_ts) > RATE_LIMITS_TTL:
-        _rate_limits_cache = await fetch_rate_limits()
-        _rate_limits_ts = now
-
     return web.json_response({
-        "rate_limits": _rate_limits_cache,
+        "rate_limits": get_plan_limits(),
         "usage": _usage,
         "subscription_plan": CURRENT_PLAN,
     })
@@ -1243,6 +1185,10 @@ async def handle_plans(request):
 
 async def handle_user_plan(request):
     """Get or set user's subscription plan"""
+    auth_error = _check_api_secret(request)
+    if auth_error:
+        return auth_error
+
     user_id = request.query.get("user_id")
     if not user_id:
         return web.json_response({"error": "user_id required"}, status=400)
@@ -1267,9 +1213,6 @@ async def handle_user_plan(request):
     
     # POST: set user plan
     if request.method == "POST":
-        auth_error = _check_api_secret(request)
-        if auth_error:
-            return auth_error
         data = await request.json()
         new_plan = data.get("plan")
         if not new_plan:
@@ -1285,6 +1228,10 @@ async def handle_user_plan(request):
 
 async def handle_metrics(request):
     """Get historical metrics for a user"""
+    auth_error = _check_api_secret(request)
+    if auth_error:
+        return auth_error
+
     user_id = request.query.get("user_id")
     month = request.query.get("month")
     
@@ -1300,6 +1247,10 @@ async def handle_metrics(request):
 
 async def handle_upgrade_notification(request):
     """Get upgrade recommendations"""
+    auth_error = _check_api_secret(request)
+    if auth_error:
+        return auth_error
+
     user_id = request.query.get("user_id")
     
     if not user_id:
@@ -1322,6 +1273,10 @@ async def handle_upgrade_notification(request):
 
 
 async def handle_history(request):
+    auth_error = _check_api_secret(request)
+    if auth_error:
+        return auth_error
+
     limit = min(int(request.query.get("limit", "50")), 200)
     offset = int(request.query.get("offset", "0"))
     tasks = list(reversed(_history_cache))
