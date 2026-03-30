@@ -51,6 +51,13 @@ RATE_LIMITS_TTL = 60
 _history_cache = []
 HISTORY_FILE = os.path.join(WORKSPACE, ".devteam", "history.jsonl")
 
+# Per-user subscription plans and monthly usage tracking
+# {user_id: "pro"} or {user_id: "starter"}
+_user_plans = {}
+# {user_id: {month: "2026-03": {requests: 5, tokens: 500000}, ...}}
+_user_monthly_usage = {}
+USAGE_FILE = os.path.join(WORKSPACE, ".devteam", "usage.jsonl")
+
 
 # --- Task State ---
 
@@ -99,6 +106,58 @@ class TaskState:
             "cost_usd": self.cost_usd,
             "num_turns": self.num_turns,
         }
+
+
+# --- Subscription & Usage Management ---
+
+def get_current_month():
+    """Return current month as YYYY-MM"""
+    return datetime.now().strftime("%Y-%m")
+
+
+def get_user_plan(user_id):
+    """Get subscription plan for user, fallback to CURRENT_PLAN"""
+    return _user_plans.get(user_id, CURRENT_PLAN)
+
+
+def set_user_plan(user_id, plan):
+    """Set subscription plan for user"""
+    if plan not in SUBSCRIPTION_PLANS:
+        raise ValueError(f"Invalid plan: {plan}")
+    _user_plans[user_id] = plan
+    log.info(f"User {user_id} plan set to {plan}")
+
+
+def get_user_monthly_usage(user_id, month=None):
+    """Get monthly usage for user"""
+    if month is None:
+        month = get_current_month()
+    if user_id not in _user_monthly_usage:
+        _user_monthly_usage[user_id] = {}
+    if month not in _user_monthly_usage[user_id]:
+        _user_monthly_usage[user_id][month] = {"requests": 0, "tokens": 0}
+    return _user_monthly_usage[user_id][month]
+
+
+def increment_user_usage(user_id, tokens_used):
+    """Increment monthly usage for user"""
+    month = get_current_month()
+    usage = get_user_monthly_usage(user_id, month)
+    usage["requests"] += 1
+    usage["tokens"] += tokens_used
+
+
+def check_user_quota(user_id):
+    """Check if user has exceeded their monthly quota. Returns tuple (allowed, remaining_requests, remaining_tokens)"""
+    plan = get_user_plan(user_id)
+    plan_limits = SUBSCRIPTION_PLANS[plan]
+    usage = get_user_monthly_usage(user_id)
+    
+    requests_remaining = plan_limits["requests_limit"] - usage["requests"]
+    tokens_remaining = plan_limits["tokens_limit"] - usage["tokens"]
+    
+    allowed = requests_remaining > 0 and tokens_remaining > 0
+    return allowed, requests_remaining, tokens_remaining
 
 
 # --- History ---
@@ -370,6 +429,14 @@ async def process_task(channel_id, content, message_id, author):
     _current_task = task
 
     async with _task_lock:
+        # Check user quota before processing
+        allowed, remaining_requests, remaining_tokens = check_user_quota(author)
+        if not allowed:
+            msg = f"❌ Quota d'utilisation atteint pour ce mois (plan: {get_user_plan(author)}). Contactez l'admin pour upgrade."
+            await send_discord(channel_id, msg, message_id)
+            log.warning(f"Task rejected for {author}: quota exceeded")
+            return
+
         # Create thread
         thread_name = content[:80] if len(content) <= 80 else content[:77] + "..."
         task.thread_id = await create_thread(channel_id, message_id, thread_name)
@@ -391,6 +458,9 @@ async def process_task(channel_id, content, message_id, author):
                     agent_data["status"] = "done"
                 elif agent_data == "running":
                     task.agents[name] = "done"
+
+            # Track usage
+            increment_user_usage(author, task.num_turns * 1000)  # Approximate tokens
 
             # Post final result
             target = task.thread_id or channel_id
@@ -573,6 +643,55 @@ async def handle_usage(request):
     })
 
 
+async def handle_plans(request):
+    """List all available subscription plans"""
+    plans_info = {}
+    for plan_name, limits in SUBSCRIPTION_PLANS.items():
+        plans_info[plan_name] = {
+            "limits": limits,
+            "active": plan_name == CURRENT_PLAN,
+        }
+    return web.json_response({"plans": plans_info})
+
+
+async def handle_user_plan(request):
+    """Get or set user's subscription plan"""
+    user_id = request.query.get("user_id")
+    if not user_id:
+        return web.json_response({"error": "user_id required"}, status=400)
+    
+    # GET: fetch user plan and monthly usage
+    if request.method == "GET":
+        plan = get_user_plan(user_id)
+        usage = get_user_monthly_usage(user_id)
+        allowed, remaining_requests, remaining_tokens = check_user_quota(user_id)
+        plan_limits = SUBSCRIPTION_PLANS[plan]
+        
+        return web.json_response({
+            "user_id": user_id,
+            "plan": plan,
+            "month": get_current_month(),
+            "usage": usage,
+            "limits": plan_limits,
+            "quota_allowed": allowed,
+            "remaining_requests": remaining_requests,
+            "remaining_tokens": remaining_tokens,
+        })
+    
+    # POST: set user plan
+    if request.method == "POST":
+        data = await request.json()
+        new_plan = data.get("plan")
+        if not new_plan:
+            return web.json_response({"error": "plan required"}, status=400)
+        try:
+            set_user_plan(user_id, new_plan)
+            return web.json_response({"user_id": user_id, "plan": new_plan})
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+    
+    return web.json_response({"error": "Method not allowed"}, status=405)
+
 
 async def handle_history(request):
     limit = min(int(request.query.get("limit", "50")), 200)
@@ -593,6 +712,9 @@ app.router.add_get("/health", handle_health)
 app.router.add_get("/ws", handle_ws)
 app.router.add_get("/history", handle_history)
 app.router.add_get("/usage", handle_usage)
+app.router.add_get("/plans", handle_plans)
+app.router.add_get("/user-plan", handle_user_plan)
+app.router.add_post("/user-plan", handle_user_plan)
 app.router.add_get("/", handle_dashboard)
 
 if __name__ == "__main__":
