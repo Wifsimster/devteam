@@ -1188,15 +1188,35 @@ async def handle_dashboard(request):
 
 
 def get_plan_limits():
-    """Return rate limits based on the current subscription plan with remaining computed from session usage."""
+    """Return rate limits based on the current subscription plan with remaining computed from monthly usage."""
     plan_limits = SUBSCRIPTION_PLANS.get(CURRENT_PLAN, SUBSCRIPTION_PLANS["pro"])
+
+    # Aggregate actual monthly usage across all users
+    month = get_current_month()
+    total_requests = 0
+    total_tokens = 0
+    for user_months in _user_monthly_usage.values():
+        if month in user_months:
+            total_requests += user_months[month].get("requests", 0)
+            total_tokens += user_months[month].get("tokens", 0)
+
+    # Next month reset timestamp
+    now = datetime.now()
+    if now.month == 12:
+        reset_date = datetime(now.year + 1, 1, 1)
+    else:
+        reset_date = datetime(now.year, now.month + 1, 1)
+    reset_iso = reset_date.isoformat()
+
     return {
         "requests_limit": plan_limits["requests_limit"],
-        "requests_remaining": max(0, plan_limits["requests_limit"] - _usage["task_count"]),
+        "requests_remaining": max(0, plan_limits["requests_limit"] - total_requests),
         "tokens_limit": plan_limits["tokens_limit"],
-        "tokens_remaining": max(0, plan_limits["tokens_limit"] - _usage["total_turns"] * 1000),
+        "tokens_remaining": max(0, plan_limits["tokens_limit"] - total_tokens),
         "input_tokens_limit": plan_limits["input_tokens_limit"],
         "output_tokens_limit": plan_limits["output_tokens_limit"],
+        "requests_reset": reset_iso,
+        "tokens_reset": reset_iso,
     }
 
 
