@@ -1227,6 +1227,13 @@ def _read_build_info():
     return version, build_date
 
 
+_FAVICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#0a1018"/><text x="16" y="23" text-anchor="middle" font-family="monospace" font-weight="bold" font-size="20" fill="#0ff">J</text></svg>'
+
+
+async def handle_favicon(request):
+    return web.Response(body=_FAVICON_SVG, content_type="image/svg+xml")
+
+
 async def handle_dashboard(request):
     html = (Path(__file__).parent / "dashboard.html").read_text()
     version, build_date = _read_build_info()
@@ -1409,6 +1416,7 @@ app.router.add_get("/plans", handle_plans)
 app.router.add_get("/user-plan", handle_user_plan)
 app.router.add_post("/user-plan", handle_user_plan)
 app.router.add_get("/", handle_dashboard)
+app.router.add_get("/favicon.ico", handle_favicon)
 
 app.router.add_get("/metrics", handle_metrics)
 app.router.add_get("/upgrade-notification", handle_upgrade_notification)
