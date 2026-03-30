@@ -16,6 +16,31 @@ CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 MAX_TURNS = int(os.environ.get("MAX_TURNS", "50"))
 DISCORD_API = "https://discord.com/api/v10"
 
+# Subscription plans with limits
+SUBSCRIPTION_PLANS = {
+    "starter": {
+        "requests_limit": 1000,
+        "tokens_limit": 1_000_000,
+        "input_tokens_limit": 500_000,
+        "output_tokens_limit": 500_000,
+    },
+    "pro": {
+        "requests_limit": 10_000,
+        "tokens_limit": 10_000_000,
+        "input_tokens_limit": 5_000_000,
+        "output_tokens_limit": 5_000_000,
+    },
+    "enterprise": {
+        "requests_limit": 100_000,
+        "tokens_limit": 100_000_000,
+        "input_tokens_limit": 50_000_000,
+        "output_tokens_limit": 50_000_000,
+    },
+}
+
+# Current active subscription plan (can be set via env var)
+CURRENT_PLAN = os.environ.get("SUBSCRIPTION_PLAN", "pro")
+
 _task_lock = asyncio.Lock()
 _ws_clients = set()
 _current_task = None
@@ -479,6 +504,10 @@ def _safe_int(v):
 
 
 async def fetch_rate_limits():
+    """
+    Fetches real API rate limits from Anthropic, but returns usage limits
+    based on the current subscription plan (max plan used).
+    """
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None
@@ -502,7 +531,8 @@ async def fetch_rate_limits():
                 json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 h = resp.headers
-                return {
+                # Real API limits
+                api_limits = {
                     "requests_limit": _safe_int(h.get("anthropic-ratelimit-requests-limit")),
                     "requests_remaining": _safe_int(h.get("anthropic-ratelimit-requests-remaining")),
                     "requests_reset": h.get("anthropic-ratelimit-requests-reset", ""),
@@ -514,6 +544,15 @@ async def fetch_rate_limits():
                     "output_tokens_limit": _safe_int(h.get("anthropic-ratelimit-output-tokens-limit")),
                     "output_tokens_remaining": _safe_int(h.get("anthropic-ratelimit-output-tokens-remaining")),
                 }
+                
+                # Use subscription plan limits instead
+                plan_limits = SUBSCRIPTION_PLANS.get(CURRENT_PLAN, SUBSCRIPTION_PLANS["pro"])
+                api_limits["requests_limit"] = plan_limits["requests_limit"]
+                api_limits["tokens_limit"] = plan_limits["tokens_limit"]
+                api_limits["input_tokens_limit"] = plan_limits["input_tokens_limit"]
+                api_limits["output_tokens_limit"] = plan_limits["output_tokens_limit"]
+                
+                return api_limits
     except Exception as e:
         log.error(f"Rate limits fetch failed: {e}")
         return None
@@ -530,7 +569,9 @@ async def handle_usage(request):
     return web.json_response({
         "rate_limits": _rate_limits_cache,
         "usage": _usage,
+        "subscription_plan": CURRENT_PLAN,
     })
+
 
 
 async def handle_history(request):
