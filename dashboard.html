@@ -2112,9 +2112,8 @@
       fetchUsage();
       setInterval(fetchUsage, 30000);
 
-      // Queue polling fallback
+      // Initial queue fetch (WebSocket handles live updates)
       fetchQueue();
-      setInterval(fetchQueue, 5000);
 
       // --- History drawer ---
 

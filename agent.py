@@ -1,5 +1,6 @@
 import asyncio
 import json
+import hmac
 import aiohttp
 from aiohttp import web
 import os
@@ -12,10 +13,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("dev-agents")
 
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
+API_SECRET = os.environ.get("API_SECRET", "")
 WORKSPACE = os.environ.get("WORKSPACE", "/workspace")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 MAX_TURNS = int(os.environ.get("MAX_TURNS", "50"))
 DISCORD_API = "https://discord.com/api/v10"
+MAX_CONTENT_LENGTH = 10_000
 
 # Subscription plans with limits
 SUBSCRIPTION_PLANS = {
@@ -58,6 +61,10 @@ _user_plans = {}
 # {user_id: {month: "2026-03": {requests: 5, tokens: 500000}, ...}}
 _user_monthly_usage = {}
 USAGE_FILE = os.path.join(WORKSPACE, ".devteam", "usage.jsonl")
+PLANS_FILE = os.path.join(WORKSPACE, ".devteam", "plans.json")
+
+# Shared aiohttp session (initialized on startup, closed on cleanup)
+_http_session = None
 
 # Persistent metrics tracking
 # Daily and monthly breakdown: {user_id: {date: "2026-03-30", day: 5, month: "2026-03", requests: 10, tokens: 50000, ...}, ...}
@@ -244,6 +251,7 @@ def set_user_plan(user_id, plan):
     if plan not in SUBSCRIPTION_PLANS:
         raise ValueError(f"Invalid plan: {plan}")
     _user_plans[user_id] = plan
+    _save_plans()
     log.info(f"User {user_id} plan set to {plan}")
 
 
@@ -264,6 +272,7 @@ def increment_user_usage(user_id, tokens_used):
     usage = get_user_monthly_usage(user_id, month)
     usage["requests"] += 1
     usage["tokens"] += tokens_used
+    _save_usage()
 
 
 def check_user_quota(user_id):
@@ -371,6 +380,52 @@ def load_metrics():
         log.error(f"Failed to load metrics: {e}")
 
 
+def _save_plans():
+    """Persist user plans to disk"""
+    try:
+        os.makedirs(os.path.dirname(PLANS_FILE), exist_ok=True)
+        with open(PLANS_FILE, "w") as f:
+            json.dump(_user_plans, f)
+    except OSError as e:
+        log.error(f"Failed to save plans: {e}")
+
+
+def _load_plans():
+    """Load user plans from disk"""
+    global _user_plans
+    if not os.path.exists(PLANS_FILE):
+        return
+    try:
+        with open(PLANS_FILE, "r") as f:
+            _user_plans = json.load(f)
+        log.info(f"Loaded {len(_user_plans)} user plans")
+    except (OSError, json.JSONDecodeError) as e:
+        log.error(f"Failed to load plans: {e}")
+
+
+def _save_usage():
+    """Persist monthly usage to disk"""
+    try:
+        os.makedirs(os.path.dirname(USAGE_FILE), exist_ok=True)
+        with open(USAGE_FILE, "w") as f:
+            json.dump(_user_monthly_usage, f)
+    except OSError as e:
+        log.error(f"Failed to save usage: {e}")
+
+
+def _load_usage():
+    """Load monthly usage from disk"""
+    global _user_monthly_usage
+    if not os.path.exists(USAGE_FILE):
+        return
+    try:
+        with open(USAGE_FILE, "r") as f:
+            _user_monthly_usage = json.load(f)
+        log.info(f"Loaded usage data for {len(_user_monthly_usage)} users")
+    except (OSError, json.JSONDecodeError) as e:
+        log.error(f"Failed to load usage: {e}")
+
+
 def get_user_metrics(user_id, month=None):
     """Get aggregated metrics for user in a given month"""
     if month is None:
@@ -436,19 +491,21 @@ def append_history(task):
 # --- Discord Helpers ---
 
 async def discord_request(method, path, json_body=None):
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        _http_session = aiohttp.ClientSession()
     headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json",
     }
-    async with aiohttp.ClientSession() as session:
-        fn = getattr(session, method)
-        async with fn(f"{DISCORD_API}{path}", json=json_body, headers=headers) as resp:
-            if resp.status not in (200, 201, 204):
-                log.error(f"Discord {method} {path} → {resp.status}")
-                return None
-            if resp.status == 204:
-                return {}
-            return await resp.json()
+    fn = getattr(_http_session, method)
+    async with fn(f"{DISCORD_API}{path}", json=json_body, headers=headers) as resp:
+        if resp.status not in (200, 201, 204):
+            log.error(f"Discord {method} {path} → {resp.status}")
+            return None
+        if resp.status == 204:
+            return {}
+        return await resp.json()
 
 
 async def send_discord(channel_id, content, reply_to=None):
@@ -769,8 +826,8 @@ async def process_task(channel_id, content, message_id, author):
             typing_task.cancel()
             task.status = "error"
             log.error(f"Task failed: {e}")
-            await send_discord(task.thread_id or channel_id, f"❌ Erreur: {e}")
-            await broadcast({"type": "task_error", "error": str(e), "task": task.to_dict()})
+            await send_discord(task.thread_id or channel_id, "❌ Une erreur interne est survenue. Consultez les logs pour plus de details.")
+            await broadcast({"type": "task_error", "error": "internal_error", "task": task.to_dict()})
 
         finally:
             if task.status != "running":
@@ -780,13 +837,40 @@ async def process_task(channel_id, content, message_id, author):
 
 # --- HTTP Handlers ---
 
+def _check_api_secret(request):
+    """Validate API secret from Authorization header. Returns error response or None if OK."""
+    if not API_SECRET:
+        return None
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return web.json_response({"error": "Missing or invalid Authorization header"}, status=401)
+    if not hmac.compare_digest(auth[7:], API_SECRET):
+        return web.json_response({"error": "Invalid API secret"}, status=403)
+    return None
+
+
 async def handle_task(request):
-    data = await request.json()
-    channel_id = data["channelId"]
-    content = data["content"]
+    auth_error = _check_api_secret(request)
+    if auth_error:
+        return auth_error
+
+    try:
+        data = await request.json()
+    except (json.JSONDecodeError, Exception):
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    channel_id = data.get("channelId")
+    content = data.get("content")
     message_id = data.get("messageId")
     author = data.get("author", "unknown")
     priority = data.get("priority", "normal")
+
+    if not channel_id or not content:
+        return web.json_response({"error": "channelId and content are required"}, status=400)
+    if not isinstance(content, str) or len(content) > MAX_CONTENT_LENGTH:
+        return web.json_response({"error": f"content must be a string of max {MAX_CONTENT_LENGTH} chars"}, status=400)
+    if not isinstance(channel_id, str):
+        return web.json_response({"error": "channelId must be a string"}, status=400)
 
     log.info(f"Task from {author} ({priority}): {content[:80]}")
 
@@ -835,6 +919,10 @@ async def handle_queue(request):
 
 
 async def handle_cancel_task(request):
+    auth_error = _check_api_secret(request)
+    if auth_error:
+        return auth_error
+
     data = await request.json()
     task_id = data.get("task_id")
     if not task_id:
@@ -932,34 +1020,34 @@ async def fetch_rate_limits():
     }
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.anthropic.com/v1/messages",
-                json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                h = resp.headers
-                # Real API limits
-                api_limits = {
-                    "requests_limit": _safe_int(h.get("anthropic-ratelimit-requests-limit")),
-                    "requests_remaining": _safe_int(h.get("anthropic-ratelimit-requests-remaining")),
-                    "requests_reset": h.get("anthropic-ratelimit-requests-reset", ""),
-                    "tokens_limit": _safe_int(h.get("anthropic-ratelimit-tokens-limit")),
-                    "tokens_remaining": _safe_int(h.get("anthropic-ratelimit-tokens-remaining")),
-                    "tokens_reset": h.get("anthropic-ratelimit-tokens-reset", ""),
-                    "input_tokens_limit": _safe_int(h.get("anthropic-ratelimit-input-tokens-limit")),
-                    "input_tokens_remaining": _safe_int(h.get("anthropic-ratelimit-input-tokens-remaining")),
-                    "output_tokens_limit": _safe_int(h.get("anthropic-ratelimit-output-tokens-limit")),
-                    "output_tokens_remaining": _safe_int(h.get("anthropic-ratelimit-output-tokens-remaining")),
-                }
-                
-                # Use subscription plan limits instead
-                plan_limits = SUBSCRIPTION_PLANS.get(CURRENT_PLAN, SUBSCRIPTION_PLANS["pro"])
-                api_limits["requests_limit"] = plan_limits["requests_limit"]
-                api_limits["tokens_limit"] = plan_limits["tokens_limit"]
-                api_limits["input_tokens_limit"] = plan_limits["input_tokens_limit"]
-                api_limits["output_tokens_limit"] = plan_limits["output_tokens_limit"]
-                
-                return api_limits
+        global _http_session
+        if _http_session is None or _http_session.closed:
+            _http_session = aiohttp.ClientSession()
+        async with _http_session.post(
+            "https://api.anthropic.com/v1/messages",
+            json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            h = resp.headers
+            api_limits = {
+                "requests_limit": _safe_int(h.get("anthropic-ratelimit-requests-limit")),
+                "requests_remaining": _safe_int(h.get("anthropic-ratelimit-requests-remaining")),
+                "requests_reset": h.get("anthropic-ratelimit-requests-reset", ""),
+                "tokens_limit": _safe_int(h.get("anthropic-ratelimit-tokens-limit")),
+                "tokens_remaining": _safe_int(h.get("anthropic-ratelimit-tokens-remaining")),
+                "tokens_reset": h.get("anthropic-ratelimit-tokens-reset", ""),
+                "input_tokens_limit": _safe_int(h.get("anthropic-ratelimit-input-tokens-limit")),
+                "input_tokens_remaining": _safe_int(h.get("anthropic-ratelimit-input-tokens-remaining")),
+                "output_tokens_limit": _safe_int(h.get("anthropic-ratelimit-output-tokens-limit")),
+                "output_tokens_remaining": _safe_int(h.get("anthropic-ratelimit-output-tokens-remaining")),
+            }
+            
+            plan_limits = SUBSCRIPTION_PLANS.get(CURRENT_PLAN, SUBSCRIPTION_PLANS["pro"])
+            api_limits["requests_limit"] = plan_limits["requests_limit"]
+            api_limits["tokens_limit"] = plan_limits["tokens_limit"]
+            api_limits["input_tokens_limit"] = plan_limits["input_tokens_limit"]
+            api_limits["output_tokens_limit"] = plan_limits["output_tokens_limit"]
+            
+            return api_limits
     except Exception as e:
         log.error(f"Rate limits fetch failed: {e}")
         return None
@@ -1017,6 +1105,9 @@ async def handle_user_plan(request):
     
     # POST: set user plan
     if request.method == "POST":
+        auth_error = _check_api_secret(request)
+        if auth_error:
+            return auth_error
         data = await request.json()
         new_plan = data.get("plan")
         if not new_plan:
@@ -1099,14 +1190,15 @@ app.router.add_get("/upgrade-notification", handle_upgrade_notification)
 
 
 async def on_startup(app):
-    global _queue_worker_task
+    global _queue_worker_task, _http_session
+    _http_session = aiohttp.ClientSession()
     if _queue_worker_task is None or _queue_worker_task.done():
         _queue_worker_task = asyncio.create_task(queue_worker())
         log.info("Queue worker started")
 
 
 async def on_cleanup(app):
-    global _queue_worker_task
+    global _queue_worker_task, _http_session
     if _queue_worker_task and not _queue_worker_task.done():
         _queue_worker_task.cancel()
         try:
@@ -1114,13 +1206,20 @@ async def on_cleanup(app):
         except asyncio.CancelledError:
             pass
         log.info("Queue worker stopped")
+    if _http_session and not _http_session.closed:
+        await _http_session.close()
+        log.info("HTTP session closed")
 
 
 app.on_startup.append(on_startup)
 app.on_cleanup.append(on_cleanup)
 
 if __name__ == "__main__":
+    if not API_SECRET:
+        log.warning("API_SECRET not set — API endpoints are unprotected!")
     load_history()
     load_metrics()
+    _load_plans()
+    _load_usage()
     log.info(f"Starting dev-agents (workspace={WORKSPACE}, model={CLAUDE_MODEL}, history={len(_history_cache)} tasks)")
     web.run_app(app, host="0.0.0.0", port=8585)
