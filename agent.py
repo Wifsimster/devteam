@@ -23,6 +23,8 @@ _usage = {"total_cost_usd": 0, "total_turns": 0, "task_count": 0}
 _rate_limits_cache = None
 _rate_limits_ts = 0
 RATE_LIMITS_TTL = 60
+_history_cache = []
+HISTORY_FILE = os.path.join(WORKSPACE, ".devteam", "history.jsonl")
 
 
 # --- Task State ---
@@ -55,6 +57,57 @@ class TaskState:
             "cost_usd": self.cost_usd,
             "num_turns": self.num_turns,
         }
+
+    def to_history(self):
+        started = datetime.fromisoformat(self.started_at)
+        finished = datetime.now()
+        duration_s = int((finished - started).total_seconds())
+        return {
+            "author": self.author,
+            "content": self.content,
+            "status": self.status,
+            "agents": {k: (v["status"] if isinstance(v, dict) else v) for k, v in self.agents.items()},
+            "started_at": self.started_at,
+            "finished_at": finished.isoformat(),
+            "duration_s": duration_s,
+            "result": self.result,
+            "cost_usd": self.cost_usd,
+            "num_turns": self.num_turns,
+        }
+
+
+# --- History ---
+
+def load_history():
+    global _history_cache
+    _history_cache = []
+    if not os.path.exists(HISTORY_FILE):
+        return
+    try:
+        with open(HISTORY_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    _history_cache.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        log.info(f"Loaded {len(_history_cache)} tasks from history")
+    except OSError as e:
+        log.error(f"Failed to load history: {e}")
+
+
+def append_history(task):
+    entry = task.to_history()
+    _history_cache.append(entry)
+    try:
+        os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+        with open(HISTORY_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError as e:
+        log.error(f"Failed to write history: {e}")
+    return entry
 
 
 # --- Discord Helpers ---
@@ -347,6 +400,8 @@ async def process_task(channel_id, content, message_id, author):
             await broadcast({"type": "task_error", "error": str(e), "task": task.to_dict()})
 
         finally:
+            if task.status != "running":
+                append_history(task)
             _current_task = None
 
 
@@ -478,15 +533,28 @@ async def handle_usage(request):
     })
 
 
+async def handle_history(request):
+    limit = min(int(request.query.get("limit", "50")), 200)
+    offset = int(request.query.get("offset", "0"))
+    tasks = list(reversed(_history_cache))
+    page = tasks[offset:offset + limit]
+    return web.json_response({
+        "tasks": page,
+        "total": len(_history_cache),
+    })
+
+
 # --- App ---
 
 app = web.Application()
 app.router.add_post("/task", handle_task)
 app.router.add_get("/health", handle_health)
 app.router.add_get("/ws", handle_ws)
+app.router.add_get("/history", handle_history)
 app.router.add_get("/usage", handle_usage)
 app.router.add_get("/", handle_dashboard)
 
 if __name__ == "__main__":
-    log.info(f"Starting dev-agents (workspace={WORKSPACE}, model={CLAUDE_MODEL})")
+    load_history()
+    log.info(f"Starting dev-agents (workspace={WORKSPACE}, model={CLAUDE_MODEL}, history={len(_history_cache)} tasks)")
     web.run_app(app, host="0.0.0.0", port=8585)
