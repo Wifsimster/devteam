@@ -60,7 +60,7 @@ HISTORY_FILE = os.path.join(WORKSPACE, ".devteam", "history.jsonl")
 _user_plans = {}
 # {user_id: {month: "2026-03": {requests: 5, tokens: 500000}, ...}}
 _user_monthly_usage = {}
-USAGE_FILE = os.path.join(WORKSPACE, ".devteam", "usage.jsonl")
+USAGE_FILE = os.path.join(WORKSPACE, ".devteam", "usage.json")
 PLANS_FILE = os.path.join(WORKSPACE, ".devteam", "plans.json")
 
 # Shared aiohttp session (initialized on startup, closed on cleanup)
@@ -70,6 +70,7 @@ _http_session = None
 # Daily and monthly breakdown: {user_id: {date: "2026-03-30", day: 5, month: "2026-03", requests: 10, tokens: 50000, ...}, ...}
 _metrics_cache = []
 METRICS_FILE = os.path.join(WORKSPACE, ".devteam", "metrics.jsonl")
+QUEUE_FILE = os.path.join(WORKSPACE, ".devteam", "queue.json")
 
 # Upgrade recommendations: {user_id: recommended_plan}
 _upgrade_notifications = {}
@@ -136,6 +137,7 @@ async def enqueue_task(channel_id, content, message_id, author, priority):
         _task_queue.append(item)
         _task_queue.sort(key=lambda x: (PRIORITY_ORDER[x["priority"]], x["enqueued_at"]))
         position = next((i for i, q in enumerate(_task_queue) if q["id"] == item["id"]), 0) + 1
+        save_queue_state()
 
     await _broadcast_queue_update()
     return item, position
@@ -147,6 +149,7 @@ async def dequeue_next_task():
             return None
         item = _task_queue.pop(0)
         item["status"] = "running"
+        save_queue_state()
         return item
 
 
@@ -156,8 +159,45 @@ async def cancel_queued_task(task_id):
             if item["id"] == task_id:
                 canceled = _task_queue.pop(i)
                 canceled["status"] = "canceled"
+                save_queue_state()
                 return canceled
     return None
+
+
+def save_queue_state():
+    """Persist task queue to disk"""
+    try:
+        os.makedirs(os.path.dirname(QUEUE_FILE), exist_ok=True)
+        with open(QUEUE_FILE, "w") as f:
+            json.dump(_task_queue, f)
+    except OSError as e:
+        log.error(f"Failed to save queue state: {e}")
+
+
+def load_queue_state():
+    """Load persisted task queue from disk"""
+    global _queue_seq
+    if not os.path.exists(QUEUE_FILE):
+        return
+    try:
+        with open(QUEUE_FILE, "r") as f:
+            items = json.load(f)
+        if not isinstance(items, list):
+            return
+        max_seq = 0
+        for item in items:
+            if item.get("status") == "queued":
+                _task_queue.append(item)
+            try:
+                seq = int(item.get("id", "q-0").split("-")[1])
+                max_seq = max(max_seq, seq)
+            except (IndexError, ValueError):
+                pass
+        _task_queue.sort(key=lambda x: (PRIORITY_ORDER.get(x.get("priority", "normal"), 1), x.get("enqueued_at", "")))
+        _queue_seq = count(max_seq + 1)
+        log.info(f"Loaded {len(_task_queue)} queued tasks from disk")
+    except (OSError, json.JSONDecodeError) as e:
+        log.error(f"Failed to load queue state: {e}")
 
 
 async def queue_worker():
@@ -202,6 +242,10 @@ class TaskState:
         self.result = ""
         self.cost_usd = 0
         self.num_turns = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.proc = None
+        self.aborted = False
 
     def to_dict(self):
         return {
@@ -214,6 +258,8 @@ class TaskState:
             "result": self.result[:500],
             "cost_usd": self.cost_usd,
             "num_turns": self.num_turns,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
         }
 
     def to_history(self):
@@ -231,6 +277,8 @@ class TaskState:
             "result": self.result,
             "cost_usd": self.cost_usd,
             "num_turns": self.num_turns,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
         }
 
 
@@ -353,6 +401,7 @@ def record_metric(user_id, requests_used, tokens_used):
         os.makedirs(os.path.dirname(METRICS_FILE), exist_ok=True)
         with open(METRICS_FILE, "a") as f:
             f.write(json.dumps(metric) + "\n")
+        rotate_jsonl_file(METRICS_FILE)
     except OSError as e:
         log.error(f"Failed to write metrics: {e}")
     
@@ -426,6 +475,32 @@ def _load_usage():
         log.error(f"Failed to load usage: {e}")
 
 
+NOTIFICATIONS_FILE = os.path.join(WORKSPACE, ".devteam", "notifications.json")
+
+
+def _save_notifications():
+    """Persist upgrade notifications to disk"""
+    try:
+        os.makedirs(os.path.dirname(NOTIFICATIONS_FILE), exist_ok=True)
+        with open(NOTIFICATIONS_FILE, "w") as f:
+            json.dump(_upgrade_notifications, f)
+    except OSError as e:
+        log.error(f"Failed to save notifications: {e}")
+
+
+def _load_notifications():
+    """Load upgrade notifications from disk"""
+    global _upgrade_notifications
+    if not os.path.exists(NOTIFICATIONS_FILE):
+        return
+    try:
+        with open(NOTIFICATIONS_FILE, "r") as f:
+            _upgrade_notifications = json.load(f)
+        log.info(f"Loaded {len(_upgrade_notifications)} upgrade notifications")
+    except (OSError, json.JSONDecodeError) as e:
+        log.error(f"Failed to load notifications: {e}")
+
+
 def get_user_metrics(user_id, month=None):
     """Get aggregated metrics for user in a given month"""
     if month is None:
@@ -452,6 +527,28 @@ def get_user_metrics(user_id, month=None):
         "total_tokens": total_tokens,
         "daily_breakdown": daily_breakdown,
     }
+
+
+# --- File Rotation ---
+
+MAX_FILE_ENTRIES = 10_000
+
+
+def rotate_jsonl_file(filepath, max_entries=MAX_FILE_ENTRIES):
+    """Rotate a JSONL file when it exceeds max_entries, keeping the most recent half"""
+    try:
+        if not os.path.exists(filepath):
+            return
+        with open(filepath, "r") as f:
+            lines = f.readlines()
+        if len(lines) <= max_entries:
+            return
+        keep = lines[len(lines) - max_entries // 2:]
+        with open(filepath, "w") as f:
+            f.writelines(keep)
+        log.info(f"Rotated {filepath}: {len(lines)} -> {len(keep)} entries")
+    except OSError as e:
+        log.error(f"Failed to rotate {filepath}: {e}")
 
 
 # --- History ---
@@ -483,6 +580,7 @@ def append_history(task):
         os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
         with open(HISTORY_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")
+        rotate_jsonl_file(HISTORY_FILE)
     except OSError as e:
         log.error(f"Failed to write history: {e}")
     return entry
@@ -584,6 +682,10 @@ async def parse_stream_line(line, task):
 
     if event_type == "assistant":
         message = data.get("message", {})
+        # Accumulate actual token usage from assistant messages
+        usage = message.get("usage", {})
+        task.input_tokens += usage.get("input_tokens", 0)
+        task.output_tokens += usage.get("output_tokens", 0)
         for block in message.get("content", []):
             if block.get("type") == "tool_use":
                 await handle_tool_use(block, task, now)
@@ -599,6 +701,11 @@ async def parse_stream_line(line, task):
         task.status = "done"
         task.cost_usd = data.get("cost_usd", 0)
         task.num_turns = data.get("num_turns", 0)
+        # Override with totals from result if available
+        if data.get("total_input_tokens"):
+            task.input_tokens = data["total_input_tokens"]
+        if data.get("total_output_tokens"):
+            task.output_tokens = data["total_output_tokens"]
         ev = {"type": "result", "text": "Tache terminee", "time": now}
         task.events.append(ev)
         await broadcast({"type": "task_complete", "task": task.to_dict()})
@@ -686,6 +793,7 @@ async def run_claude_stream(prompt, task):
         stderr=asyncio.subprocess.PIPE,
         cwd=WORKSPACE,
     )
+    task.proc = proc
 
     final_result = ""
 
@@ -707,7 +815,13 @@ async def run_claude_stream(prompt, task):
             await proc.wait()
     except TimeoutError:
         proc.kill()
+        task.proc = None
         raise asyncio.TimeoutError("Claude CLI timeout (>15 min)")
+
+    task.proc = None
+
+    if task.aborted:
+        raise asyncio.CancelledError("Task aborted by user")
 
     if proc.returncode != 0:
         stderr = await proc.stderr.read()
@@ -755,11 +869,13 @@ async def process_task(channel_id, content, message_id, author):
                 elif agent_data == "running":
                     task.agents[name] = "done"
 
-            # Track usage
-            increment_user_usage(author, task.num_turns * 1000)  # Approximate tokens
+            # Track usage (actual tokens from stream, fallback to estimate)
+            actual_tokens = task.input_tokens + task.output_tokens
+            tokens_used = actual_tokens if actual_tokens > 0 else task.num_turns * 1000
+            increment_user_usage(author, tokens_used)
             
             # Record metrics for history
-            record_metric(author, 1, task.num_turns * 1000)
+            record_metric(author, 1, tokens_used)
             
             # Check if upgrade recommended
             should_upgrade, recommended_plan, reason = get_recommended_plan(author)
@@ -769,6 +885,7 @@ async def process_task(channel_id, content, message_id, author):
                     "recommended_plan": recommended_plan,
                     "reason": reason,
                 }
+                _save_notifications()
             
             # Send WebSocket alert if quota threshold reached
             requests_pct, tokens_pct, alert_level, max_pct = get_user_usage_percentage(author)
@@ -814,6 +931,13 @@ async def process_task(channel_id, content, message_id, author):
             _usage["task_count"] += 1
 
             log.info(f"Task done for {author} ({len(result)} chars, ${task.cost_usd:.4f})")
+
+        except asyncio.CancelledError:
+            typing_task.cancel()
+            task.status = "aborted"
+            log.info(f"Task aborted for {author}")
+            await send_discord(task.thread_id or channel_id, "🛑 Tache annulee par un utilisateur.")
+            await broadcast({"type": "task_aborted", "task": task.to_dict()})
 
         except asyncio.TimeoutError:
             typing_task.cancel()
@@ -934,6 +1058,44 @@ async def handle_cancel_task(request):
 
     await _broadcast_queue_update()
     return web.json_response({"status": "canceled", "task_id": task_id})
+
+
+async def abort_running_task():
+    """Abort the currently running task by killing its Claude CLI subprocess."""
+    global _current_task
+    if not _current_task:
+        return None
+    task = _current_task
+    task.aborted = True
+    if task.proc:
+        try:
+            task.proc.terminate()
+            try:
+                await asyncio.wait_for(task.proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                task.proc.kill()
+        except ProcessLookupError:
+            pass
+    return task
+
+
+async def handle_abort(request):
+    auth_error = _check_api_secret(request)
+    if auth_error:
+        return auth_error
+
+    if not _current_task:
+        return web.json_response({"error": "no task is currently running"}, status=404)
+
+    task = await abort_running_task()
+    if not task:
+        return web.json_response({"error": "no task is currently running"}, status=404)
+
+    return web.json_response({
+        "status": "aborted",
+        "author": task.author,
+        "content": task.content[:140],
+    })
 
 
 async def handle_ws(request):
@@ -1175,6 +1337,7 @@ async def handle_history(request):
 app = web.Application()
 app.router.add_post("/task", handle_task)
 app.router.add_post("/task/cancel", handle_cancel_task)
+app.router.add_post("/task/abort", handle_abort)
 app.router.add_get("/health", handle_health)
 app.router.add_get("/ws", handle_ws)
 app.router.add_get("/queue", handle_queue)
@@ -1198,7 +1361,29 @@ async def on_startup(app):
 
 
 async def on_cleanup(app):
-    global _queue_worker_task, _http_session
+    global _queue_worker_task, _http_session, _current_task
+    # Terminate running Claude CLI subprocess
+    if _current_task and _current_task.proc:
+        log.info("Terminating running Claude CLI subprocess...")
+        try:
+            _current_task.proc.terminate()
+            try:
+                await asyncio.wait_for(_current_task.proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                _current_task.proc.kill()
+            _current_task.status = "interrupted"
+            append_history(_current_task)
+            log.info("Running task saved as interrupted")
+        except ProcessLookupError:
+            pass
+        _current_task = None
+
+    # Persist state before shutdown
+    _save_plans()
+    _save_usage()
+    _save_notifications()
+    save_queue_state()
+
     if _queue_worker_task and not _queue_worker_task.done():
         _queue_worker_task.cancel()
         try:
@@ -1221,5 +1406,7 @@ if __name__ == "__main__":
     load_metrics()
     _load_plans()
     _load_usage()
-    log.info(f"Starting dev-agents (workspace={WORKSPACE}, model={CLAUDE_MODEL}, history={len(_history_cache)} tasks)")
+    _load_notifications()
+    load_queue_state()
+    log.info(f"Starting dev-agents (workspace={WORKSPACE}, model={CLAUDE_MODEL}, history={len(_history_cache)} tasks, queue={len(_task_queue)})")
     web.run_app(app, host="0.0.0.0", port=8585)
