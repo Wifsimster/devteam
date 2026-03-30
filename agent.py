@@ -595,19 +595,37 @@ def append_history(task):
 
 # --- Discord Helpers ---
 
-async def discord_request(method, path, json_body=None):
+async def discord_request(method, path, json_body=None, _retries=2):
     headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
         "Content-Type": "application/json",
     }
-    fn = getattr(_http_session, method)
-    async with fn(f"{DISCORD_API}{path}", json=json_body, headers=headers) as resp:
-        if resp.status not in (200, 201, 204):
-            log.error(f"Discord {method} {path} → {resp.status}")
+    for attempt in range(_retries + 1):
+        try:
+            fn = getattr(_http_session, method)
+            async with fn(f"{DISCORD_API}{path}", json=json_body, headers=headers) as resp:
+                if resp.status == 429:
+                    retry_after = float(resp.headers.get("Retry-After", "1"))
+                    log.warning(f"Discord rate limited, retry after {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    continue
+                if resp.status >= 500 and attempt < _retries:
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+                if resp.status not in (200, 201, 204):
+                    log.error(f"Discord {method} {path} → {resp.status}")
+                    return None
+                if resp.status == 204:
+                    return {}
+                return await resp.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            if attempt < _retries:
+                log.warning(f"Discord request failed (attempt {attempt + 1}): {e}")
+                await asyncio.sleep(1 * (attempt + 1))
+                continue
+            log.error(f"Discord {method} {path} failed after {_retries + 1} attempts: {e}")
             return None
-        if resp.status == 204:
-            return {}
-        return await resp.json()
+    return None
 
 
 async def send_discord(channel_id, content, reply_to=None):
@@ -775,16 +793,25 @@ async def handle_tool_use(block, task, now):
 
 # --- Claude Runner ---
 
+def sanitize_prompt(text):
+    """Sanitize user input before passing to Claude CLI."""
+    # Strip null bytes and control characters (keep newlines/tabs)
+    cleaned = "".join(ch for ch in text if ch == '\n' or ch == '\t' or (ord(ch) >= 32))
+    # Enforce max length
+    return cleaned[:MAX_CONTENT_LENGTH]
+
+
 async def run_claude_stream(prompt, task):
+    safe_prompt = sanitize_prompt(prompt)
     cmd = [
-        "claude", "-p", prompt,
+        "claude", "-p", safe_prompt,
         "--output-format", "stream-json",
         "--dangerously-skip-permissions",
         "--model", CLAUDE_MODEL,
         "--max-turns", str(MAX_TURNS),
     ]
 
-    log.info(f"Running claude (stream): {prompt[:80]}...")
+    log.info(f"Running claude (stream): {safe_prompt[:80]}...")
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -1097,6 +1124,12 @@ async def handle_abort(request):
 
 
 async def handle_ws(request):
+    # Authenticate WebSocket via token query param
+    if API_SECRET:
+        token = request.query.get("token", "")
+        if not hmac.compare_digest(token, API_SECRET):
+            return web.Response(status=403, text="Forbidden")
+
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     _ws_clients.add(ws)
@@ -1148,6 +1181,9 @@ async def handle_dashboard(request):
     html = (Path(__file__).parent / "dashboard.html").read_text()
     version, build_date = _read_build_info()
     html = html.replace("{{VERSION}}", version).replace("{{BUILD_DATE}}", build_date)
+    # Inject WS auth token for the dashboard (escaped for JS)
+    ws_token = json.dumps(API_SECRET) if API_SECRET else '""'
+    html = html.replace("</head>", f"<script>window.__WS_TOKEN={ws_token};</script></head>")
     return web.Response(text=html, content_type="text/html")
 
 

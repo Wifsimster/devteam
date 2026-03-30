@@ -5,6 +5,7 @@ services:
     container_name: dev-agents
     image: ghcr.io/wifsimster/devteam:latest
     restart: unless-stopped
+    stop_grace_period: 20s
     security_opt:
       - no-new-privileges:true
     deploy:
