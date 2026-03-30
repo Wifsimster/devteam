@@ -58,6 +58,14 @@ _user_plans = {}
 _user_monthly_usage = {}
 USAGE_FILE = os.path.join(WORKSPACE, ".devteam", "usage.jsonl")
 
+# Persistent metrics tracking
+# Daily and monthly breakdown: {user_id: {date: "2026-03-30", day: 5, month: "2026-03", requests: 10, tokens: 50000, ...}, ...}
+_metrics_cache = []
+METRICS_FILE = os.path.join(WORKSPACE, ".devteam", "metrics.jsonl")
+
+# Upgrade recommendations: {user_id: recommended_plan}
+_upgrade_notifications = {}
+
 
 # --- Task State ---
 
@@ -179,6 +187,105 @@ def get_user_usage_percentage(user_id):
         alert_level = None
     
     return requests_pct, tokens_pct, alert_level, max_pct
+
+
+def get_recommended_plan(user_id):
+    """Determine if user should upgrade based on usage. Returns (should_upgrade, recommended_plan, reason)"""
+    plan = get_user_plan(user_id)
+    requests_pct, tokens_pct, alert_level, max_pct = get_user_usage_percentage(user_id)
+    
+    # No upgrade needed if not critical
+    if alert_level != "critical":
+        return False, None, None
+    
+    # Find next tier
+    plan_order = ["starter", "pro", "enterprise"]
+    current_idx = plan_order.index(plan) if plan in plan_order else 1
+    
+    if current_idx >= len(plan_order) - 1:
+        # Already on highest plan
+        return False, None, None
+    
+    next_plan = plan_order[current_idx + 1]
+    reason = f"Usage at {max_pct:.0f}% on {plan} plan, upgrade to {next_plan}"
+    return True, next_plan, reason
+
+
+def record_metric(user_id, requests_used, tokens_used):
+    """Record daily/monthly metrics for user"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    month = get_current_month()
+    
+    metric = {
+        "user": user_id,
+        "timestamp": datetime.now().isoformat(),
+        "date": today,
+        "month": month,
+        "plan": get_user_plan(user_id),
+        "requests": requests_used,
+        "tokens": tokens_used,
+    }
+    
+    _metrics_cache.append(metric)
+    
+    # Persist to file
+    try:
+        os.makedirs(os.path.dirname(METRICS_FILE), exist_ok=True)
+        with open(METRICS_FILE, "a") as f:
+            f.write(json.dumps(metric) + "\n")
+    except OSError as e:
+        log.error(f"Failed to write metrics: {e}")
+    
+    return metric
+
+
+def load_metrics():
+    """Load historical metrics from file"""
+    global _metrics_cache
+    _metrics_cache = []
+    if not os.path.exists(METRICS_FILE):
+        return
+    try:
+        with open(METRICS_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    _metrics_cache.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        log.info(f"Loaded {len(_metrics_cache)} metrics from history")
+    except OSError as e:
+        log.error(f"Failed to load metrics: {e}")
+
+
+def get_user_metrics(user_id, month=None):
+    """Get aggregated metrics for user in a given month"""
+    if month is None:
+        month = get_current_month()
+    
+    total_requests = 0
+    total_tokens = 0
+    daily_breakdown = {}  # {date: {requests, tokens}}
+    
+    for metric in _metrics_cache:
+        if metric.get("user") == user_id and metric.get("month") == month:
+            total_requests += metric.get("requests", 0)
+            total_tokens += metric.get("tokens", 0)
+            
+            date = metric.get("date")
+            if date not in daily_breakdown:
+                daily_breakdown[date] = {"requests": 0, "tokens": 0}
+            daily_breakdown[date]["requests"] += metric.get("requests", 0)
+            daily_breakdown[date]["tokens"] += metric.get("tokens", 0)
+    
+    return {
+        "month": month,
+        "total_requests": total_requests,
+        "total_tokens": total_tokens,
+        "daily_breakdown": daily_breakdown,
+    }
 
 
 # --- History ---
@@ -483,6 +590,18 @@ async def process_task(channel_id, content, message_id, author):
             # Track usage
             increment_user_usage(author, task.num_turns * 1000)  # Approximate tokens
             
+            # Record metrics for history
+            record_metric(author, 1, task.num_turns * 1000)
+            
+            # Check if upgrade recommended
+            should_upgrade, recommended_plan, reason = get_recommended_plan(author)
+            if should_upgrade:
+                _upgrade_notifications[author] = {
+                    "timestamp": datetime.now().isoformat(),
+                    "recommended_plan": recommended_plan,
+                    "reason": reason,
+                }
+            
             # Send WebSocket alert if quota threshold reached
             requests_pct, tokens_pct, alert_level, max_pct = get_user_usage_percentage(author)
             if alert_level:
@@ -500,6 +619,13 @@ async def process_task(channel_id, content, message_id, author):
                     alert_event["message"] = f"🚨 CRITIQUE: Vous avez utilisé {max_pct:.0f}% de votre quota mensuel ({get_user_plan(author)})"
                 else:
                     alert_event["message"] = f"⚠️ ATTENTION: Vous avez utilisé {max_pct:.0f}% de votre quota mensuel ({get_user_plan(author)})"
+                
+                # Add upgrade recommendation if applicable
+                if should_upgrade:
+                    alert_event["upgrade_recommended"] = True
+                    alert_event["recommended_plan"] = recommended_plan
+                    alert_event["message"] += f"\n📈 Upgrade recommandé vers {recommended_plan}"
+                
                 await broadcast(alert_event)
                 log.warning(f"Quota alert for {author}: {alert_level} ({max_pct:.0f}%)")
 
@@ -734,6 +860,44 @@ async def handle_user_plan(request):
     return web.json_response({"error": "Method not allowed"}, status=405)
 
 
+async def handle_metrics(request):
+    """Get historical metrics for a user"""
+    user_id = request.query.get("user_id")
+    month = request.query.get("month")
+    
+    if not user_id:
+        return web.json_response({"error": "user_id required"}, status=400)
+    
+    metrics = get_user_metrics(user_id, month)
+    return web.json_response({
+        "user_id": user_id,
+        "metrics": metrics,
+    })
+
+
+async def handle_upgrade_notification(request):
+    """Get upgrade recommendations"""
+    user_id = request.query.get("user_id")
+    
+    if not user_id:
+        return web.json_response({"error": "user_id required"}, status=400)
+    
+    notification = _upgrade_notifications.get(user_id)
+    if not notification:
+        return web.json_response({
+            "user_id": user_id,
+            "upgrade_recommended": False,
+        })
+    
+    return web.json_response({
+        "user_id": user_id,
+        "upgrade_recommended": True,
+        "recommended_plan": notification.get("recommended_plan"),
+        "reason": notification.get("reason"),
+        "timestamp": notification.get("timestamp"),
+    })
+
+
 async def handle_history(request):
     limit = min(int(request.query.get("limit", "50")), 200)
     offset = int(request.query.get("offset", "0"))
@@ -758,7 +922,10 @@ app.router.add_get("/user-plan", handle_user_plan)
 app.router.add_post("/user-plan", handle_user_plan)
 app.router.add_get("/", handle_dashboard)
 
+app.router.add_get("/metrics", handle_metrics)
+app.router.add_get("/upgrade-notification", handle_upgrade_notification)
 if __name__ == "__main__":
     load_history()
+    load_metrics()
     log.info(f"Starting dev-agents (workspace={WORKSPACE}, model={CLAUDE_MODEL}, history={len(_history_cache)} tasks)")
     web.run_app(app, host="0.0.0.0", port=8585)

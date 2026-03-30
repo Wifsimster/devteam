@@ -1446,7 +1446,9 @@
     </div>
 
     <!-- QUOTA ALERTS (real-time) -->
-    <div id="quotaAlertsContainer" style="position: fixed; top: 80px; right: 20px; width: 400px; z-index: 1000; max-height: 300px; overflow-y: auto;"></div>
+    <div id="quotaAlertsContainer"
+      style="position: fixed; top: 80px; right: 20px; width: 400px; z-index: 1000; max-height: 300px; overflow-y: auto;">
+    </div>
 
     <!-- AGENTS PANEL (full width) -->
     <div class="panel agents-full">
@@ -1612,7 +1614,7 @@
         const container = document.getElementById('quotaAlertsContainer');
         const div = document.createElement('div');
         const className = alert.level === 'critical' ? 'critical' : 'warning';
-        
+
         const bars = `
           <div class="quota-alert-bar">
             <span class="quota-alert-bar-label">Requêtes</span>
@@ -1629,15 +1631,23 @@
             <span class="quota-alert-bar-value">${alert.tokens_pct.toFixed(0)}%</span>
           </div>
         `;
-        
+
         div.className = `quota-alert ${className}`;
         div.innerHTML = `
           <div class="quota-alert-header">${alert.message}</div>
           <div class="quota-alert-bars">${bars}</div>
         `;
-        
+
+        // Add upgrade recommendation if present
+        if (alert.upgrade_recommended) {
+          const upgradeHtml = `<div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid currentColor; font-size: 10px; opacity: 0.9;">📈 <strong>Upgrade recommandé:</strong> ${alert.recommended_plan}</div>`;
+          const bars = div.innerHTML.match(/<div class="quota-alert-bars">.*?<\/div>/s);
+          if (bars) {
+            div.innerHTML = div.innerHTML.replace(/<\/div>\s*$/, upgradeHtml + '</div>');
+          }
+        }
         container.insertBefore(div, container.firstChild);
-        
+
         // Auto-remove after 10 seconds
         setTimeout(() => {
           div.style.opacity = '0';
