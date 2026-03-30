@@ -121,7 +121,7 @@ def split_message(text, limit=1950):
 # --- WebSocket ---
 
 async def broadcast(event):
-    global _current_task
+    global _current_task, _ws_clients
     msg = json.dumps(event)
     dead = set()
     for ws in _ws_clients:
