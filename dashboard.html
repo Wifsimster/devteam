@@ -373,20 +373,35 @@
   }
 
   /* === AGENTS === */
+  .agents-full {
+    margin-bottom: 16px;
+  }
+
   .agents-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: 10px;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+  }
+
+  @media (max-width: 900px) {
+    .agents-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  @media (max-width: 500px) {
+    .agents-grid { grid-template-columns: 1fr; }
   }
 
   .agent-card {
-    padding: 14px;
+    padding: 16px;
     background: var(--bg-deep);
     border: 1px solid var(--border);
     border-radius: 2px;
     position: relative;
     overflow: hidden;
     transition: all 0.4s;
+    min-height: 140px;
+    display: flex;
+    flex-direction: column;
   }
 
   .agent-card::after {
@@ -400,10 +415,19 @@
     transition: all 0.4s;
   }
 
+  .agent-card.running {
+    border-color: var(--green-dim);
+  }
+
   .agent-card.running::after {
     background: var(--green);
     box-shadow: 0 0 10px var(--green);
     animation: agent-bar 2s ease-in-out infinite;
+  }
+
+  .agent-card.done {
+    border-color: var(--cyan-dim);
+    opacity: 0.7;
   }
 
   .agent-card.done::after {
@@ -411,43 +435,127 @@
     opacity: 0.5;
   }
 
+  .agent-card.standby {
+    opacity: 0.4;
+  }
+
   @keyframes agent-bar {
     0%, 100% { opacity: 0.5; }
     50% { opacity: 1; }
   }
 
-  .agent-card .agent-icon {
-    font-size: 22px;
-    margin-bottom: 8px;
+  .agent-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
   }
 
-  .agent-card .agent-name {
+  .agent-header .agent-icon {
+    font-size: 20px;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .agent-card.running .agent-icon {
+    border-color: var(--green-dim);
+    box-shadow: 0 0 8px #0f62;
+  }
+
+  .agent-header .agent-identity {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .agent-header .agent-name {
     font-weight: 700;
     color: var(--text-bright);
     font-size: 13px;
-    margin-bottom: 2px;
   }
 
-  .agent-card .agent-role {
+  .agent-header .agent-role {
     font-size: 10px;
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 2px;
   }
 
-  .agent-card .agent-status {
-    margin-top: 8px;
+  .agent-beacon {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--text-dim);
+  }
+
+  .agent-card.running .agent-beacon {
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: beacon-pulse 1.5s ease-in-out infinite;
+  }
+
+  .agent-card.done .agent-beacon {
+    background: var(--cyan-dim);
+  }
+
+  .agent-desc {
+    font-size: 11px;
+    color: var(--text);
+    margin-bottom: 8px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  .agent-meta {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .agent-meta-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     font-size: 10px;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-  }
-
-  .agent-card.running .agent-status {
-    color: var(--green);
-  }
-
-  .agent-card.done .agent-status {
     color: var(--text-dim);
+    letter-spacing: 1px;
+  }
+
+  .agent-meta-row .meta-value {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .agent-last-action {
+    font-size: 11px;
+    color: var(--amber);
+    margin-top: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .agent-status-label {
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-top: 6px;
+  }
+
+  .agent-card.running .agent-status-label {
+    color: var(--green);
   }
 
   /* === TIMELINE === */
@@ -548,6 +656,21 @@
   .tl-detail strong {
     color: var(--text-bright);
     font-weight: 500;
+  }
+
+  .tl-agent-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 2px;
+    background: #1a2a3a;
+    border: 1px solid var(--border);
+    color: var(--cyan-dim);
+    margin-right: 6px;
+    vertical-align: middle;
   }
 
   /* === RESULT === */
@@ -671,6 +794,21 @@
     <span class="status-detail" id="statusDetail"></span>
   </div>
 
+  <!-- AGENTS PANEL (full width) -->
+  <div class="panel agents-full">
+    <div class="panel-header">
+      <span class="tag">Equipe</span>
+      <span class="count" id="agentCount">0 actifs</span>
+    </div>
+    <div class="panel-body" id="agentList">
+      <div class="agents-grid" id="agentsGrid"></div>
+    </div>
+    <div class="corner-tl"></div>
+    <div class="corner-tr"></div>
+    <div class="corner-bl"></div>
+    <div class="corner-br"></div>
+  </div>
+
   <!-- MAIN GRID -->
   <div class="grid">
     <!-- Task Panel -->
@@ -691,27 +829,6 @@
       <div class="corner-bl"></div>
       <div class="corner-br"></div>
     </div>
-
-    <!-- Agents Panel -->
-    <div class="panel">
-      <div class="panel-header">
-        <span class="tag">Agents</span>
-        <span class="count" id="agentCount">0 actifs</span>
-      </div>
-      <div class="panel-body" id="agentList">
-        <div class="empty-state">
-          <div class="empty-icon">&#x25CB;</div>
-          <span>En standby</span>
-          <div class="empty-line"></div>
-          <span style="font-size:10px; opacity:0.5">agents disponibles</span>
-        </div>
-      </div>
-      <div class="corner-tl"></div>
-      <div class="corner-tr"></div>
-      <div class="corner-bl"></div>
-      <div class="corner-br"></div>
-    </div>
-  </div>
 
   <!-- Timeline Panel -->
   <div class="panel">
@@ -751,11 +868,15 @@
 </div>
 
 <script>
-const AGENTS_META = {
-  'Alice':   { role: 'Frontend',      icon: '&#9670;' },
-  'Bob':     { role: 'Backend',       icon: '&#9646;' },
-  'Charlie': { role: 'DevOps',        icon: '&#9652;' },
-};
+const TEAM = [
+  { name: 'Jarvis',  role: 'CEO',      icon: '&#9830;', color: 'var(--cyan)' },
+  { name: 'Alice',   role: 'Frontend', icon: '&#9670;', color: '#f0a' },
+  { name: 'Bob',     role: 'Backend',  icon: '&#9646;', color: '#0af' },
+  { name: 'Charlie', role: 'DevOps',   icon: '&#9652;', color: '#fa0' },
+];
+
+const AGENTS_META = {};
+TEAM.forEach(t => { AGENTS_META[t.name] = t; });
 
 const TOOL_ICONS = {
   'Read': '&#8811;', 'Write': '&#9998;', 'Edit': '&#9874;', 'Bash': '&#9646;',
@@ -765,6 +886,8 @@ const TOOL_ICONS = {
 let ws;
 let reconnectTimer;
 let eventCount = 0;
+let _taskStartedAt = null;
+let _agentTimers = {};
 
 // Clock
 function updateClock() {
@@ -861,41 +984,7 @@ function updateTask(task) {
   `;
 
   // Agents
-  const agentDiv = document.getElementById('agentList');
-  const agents = task.agents || {};
-  const agentEntries = Object.entries(agents);
-  let runningCount = agentEntries.filter(([,s]) => s === 'running').length;
-
-  // Always show Jarvis CEO
-  const jarvisStatus = task.status === 'running' ? 'running' : (task.status === 'done' ? 'done' : '');
-  if (jarvisStatus === 'running') runningCount++;
-
-  document.getElementById('agentCount').textContent = `${runningCount} actif${runningCount !== 1 ? 's' : ''}`;
-
-  let html = `<div class="agents-grid">`;
-
-  // Jarvis CEO always first
-  html += `
-    <div class="agent-card ${jarvisStatus}">
-      <div class="agent-icon">&#9830;</div>
-      <div class="agent-name">Jarvis</div>
-      <div class="agent-role">CEO</div>
-      <div class="agent-status">${task.status === 'running' ? '&#9679; actif' : task.status}</div>
-    </div>`;
-
-  agentEntries.forEach(([name, status]) => {
-    const meta = AGENTS_META[name] || { role: 'Agent', icon: '&#9679;' };
-    html += `
-      <div class="agent-card ${status}">
-        <div class="agent-icon">${meta.icon}</div>
-        <div class="agent-name">${esc(name)}</div>
-        <div class="agent-role">${meta.role}</div>
-        <div class="agent-status">${status === 'running' ? '&#9679; actif' : status}</div>
-      </div>`;
-  });
-
-  html += `</div>`;
-  agentDiv.innerHTML = html;
+  updateAgents(task);
 }
 
 function addTimelineEvent(ev) {
@@ -922,12 +1011,20 @@ function addTimelineEvent(ev) {
   else if (ev.type === 'text') detail = esc(ev.text);
   else if (ev.type === 'result') detail = '<strong>Tache terminee</strong>';
 
+  // Agent badge
+  let agentBadge = '';
+  if (ev.agent) {
+    const meta = AGENTS_META[ev.agent];
+    const label = meta ? meta.name : ev.agent;
+    agentBadge = `<span class="tl-agent-badge">${esc(label)}</span> `;
+  }
+
   const div = document.createElement('div');
   div.className = 'tl-event';
   div.innerHTML = `
     <span class="tl-time">${ev.time || ''}</span>
     <span class="tl-icon ${iconClass}">${icon}</span>
-    <span class="tl-detail">${detail}</span>`;
+    <span class="tl-detail">${agentBadge}${detail}</span>`;
   tl.appendChild(div);
   tl.scrollTop = tl.scrollHeight;
 }
@@ -944,6 +1041,153 @@ function esc(s) {
   d.textContent = s || '';
   return d.innerHTML;
 }
+
+// --- Agents real-time view ---
+
+function getAgentStatus(name, task) {
+  if (!task) return 'standby';
+  const agentData = task.agents?.[name];
+  if (agentData) {
+    const status = typeof agentData === 'string' ? agentData : agentData.status;
+    return status || 'standby';
+  }
+  if (name === 'Jarvis') {
+    return task.status === 'running' ? 'running' : (task.status === 'done' ? 'done' : 'standby');
+  }
+  return 'standby';
+}
+
+function getAgentInfo(name, task) {
+  if (!task) return null;
+  const d = task.agents?.[name];
+  if (!d || typeof d === 'string') return null;
+  return d;
+}
+
+function formatElapsed(startStr) {
+  if (!startStr) return '';
+  const parts = startStr.split(':');
+  if (parts.length !== 3) return '';
+  const startDate = new Date();
+  startDate.setHours(parseInt(parts[0]), parseInt(parts[1]), parseInt(parts[2]), 0);
+  const diff = Math.max(0, Math.floor((Date.now() - startDate.getTime()) / 1000));
+  const m = Math.floor(diff / 60);
+  const s = diff % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function formatElapsedISO(isoStr) {
+  if (!isoStr) return '';
+  const start = new Date(isoStr);
+  if (isNaN(start)) return '';
+  const diff = Math.max(0, Math.floor((Date.now() - start.getTime()) / 1000));
+  const m = Math.floor(diff / 60);
+  const s = diff % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function renderAgentCard(member, status, info) {
+  const statusLabels = {
+    running: '&#9679; actif',
+    done: '&#10003; termine',
+    standby: '&#9675; standby',
+    error: '&#9679; erreur',
+    timeout: '&#9679; timeout',
+  };
+
+  const desc = info?.description || '';
+  const evCount = info?.events_count || 0;
+  const lastAction = info?.last_action || '';
+  const startedAt = info?.started_at || '';
+
+  let metaHtml = '';
+  if (status === 'running' || status === 'done') {
+    metaHtml = `
+      <div class="agent-meta">
+        ${evCount > 0 ? `<div class="agent-meta-row"><span>Evenements</span><span class="meta-value">${evCount}</span></div>` : ''}
+        ${startedAt ? `<div class="agent-meta-row"><span>Duree</span><span class="meta-value agent-timer" data-start="${startedAt}">${formatElapsed(startedAt)}</span></div>` : ''}
+      </div>
+      ${lastAction ? `<div class="agent-last-action">${esc(lastAction)}</div>` : ''}`;
+  }
+
+  return `
+    <div class="agent-card ${status}">
+      <div class="agent-header">
+        <div class="agent-icon">${member.icon}</div>
+        <div class="agent-identity">
+          <div class="agent-name">${esc(member.name)}</div>
+          <div class="agent-role">${member.role}</div>
+        </div>
+        <div class="agent-beacon"></div>
+      </div>
+      ${desc && member.name !== 'Jarvis' ? `<div class="agent-desc">${esc(desc)}</div>` : ''}
+      ${metaHtml}
+      <div class="agent-status-label">${statusLabels[status] || status}</div>
+    </div>`;
+}
+
+let _lastTask = null;
+
+function updateAgents(task) {
+  _lastTask = task;
+  const grid = document.getElementById('agentsGrid');
+  let runningCount = 0;
+
+  let html = '';
+  TEAM.forEach(member => {
+    const status = getAgentStatus(member.name, task);
+    let info = getAgentInfo(member.name, task);
+    // Jarvis gets a virtual info based on task data
+    if (member.name === 'Jarvis' && task && (status === 'running' || status === 'done')) {
+      const taskTime = task.started_at?.split('T')[1]?.split('.')[0] || '';
+      const agentNames = Object.keys(task.agents || {});
+      info = {
+        description: '',
+        started_at: taskTime,
+        events_count: (task.events?.length || 0),
+        last_action: agentNames.length > 0 ? `&#10697; ${agentNames.length} sous-agent${agentNames.length > 1 ? 's' : ''}` : '',
+      };
+    }
+    if (status === 'running') runningCount++;
+    html += renderAgentCard(member, status, info);
+  });
+
+  // Handle unknown agents not in TEAM
+  if (task?.agents) {
+    Object.entries(task.agents).forEach(([name, data]) => {
+      if (AGENTS_META[name]) return; // already rendered
+      const status = typeof data === 'string' ? data : data.status;
+      const info = typeof data === 'string' ? null : data;
+      const member = { name, role: 'Agent', icon: '&#9679;', color: 'var(--text)' };
+      if (status === 'running') runningCount++;
+      html += renderAgentCard(member, status, info);
+    });
+  }
+
+  grid.innerHTML = html;
+  document.getElementById('agentCount').textContent = `${runningCount} actif${runningCount !== 1 ? 's' : ''}`;
+
+  // Store task start for Jarvis timer
+  if (task?.started_at) _taskStartedAt = task.started_at;
+}
+
+// Timer: update elapsed times every second
+setInterval(() => {
+  // Update agent timers
+  document.querySelectorAll('.agent-timer').forEach(el => {
+    const start = el.dataset.start;
+    if (start) el.textContent = formatElapsed(start);
+  });
+
+  // Update Jarvis timer (uses task started_at)
+  if (_lastTask?.status === 'running' && _taskStartedAt) {
+    const jarvisCard = document.querySelector('.agent-card.running .agent-meta-row .agent-timer');
+    // Jarvis doesn't have a timer by default, so we add it via updateAgents
+  }
+}, 1000);
+
+// Initial render: show team in standby
+updateAgents(null);
 
 connect();
 </script>

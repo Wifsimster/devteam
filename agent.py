@@ -34,6 +34,7 @@ class TaskState:
         self.agents = {}
         self.started_at = datetime.now().isoformat()
         self.status = "running"
+        self._active_agent = None
         self.result = ""
         self.cost_usd = 0
         self.num_turns = 0
@@ -174,7 +175,14 @@ async def handle_tool_use(block, task, now):
     if name == "Agent":
         desc = inp.get("description", "agent")
         agent_name = desc.split()[0] if desc else "agent"
-        task.agents[agent_name] = "running"
+        task.agents[agent_name] = {
+            "status": "running",
+            "description": desc,
+            "started_at": now,
+            "events_count": 0,
+            "last_action": "",
+        }
+        task._active_agent = agent_name
         discord_msg = f"{icon} **Delegation** → {desc}"
         ev = {"type": "agent_spawn", "name": agent_name, "description": desc, "time": now}
         # Always post agent spawns to thread
@@ -202,6 +210,21 @@ async def handle_tool_use(block, task, now):
         ev = {"type": "tool", "tool": "Read", "file": short, "time": now}
     else:
         ev = {"type": "tool", "tool": name, "time": now}
+
+    # Track agent context
+    if task._active_agent:
+        ev["agent"] = task._active_agent
+        agent_data = task.agents.get(task._active_agent)
+        if isinstance(agent_data, dict) and name != "Agent":
+            agent_data["events_count"] += 1
+            if name in ("Write", "Edit"):
+                agent_data["last_action"] = f"{icon} {os.path.basename(inp.get('file_path', ''))}"
+            elif name == "Bash":
+                agent_data["last_action"] = f"{icon} {inp.get('command', '')[:60]}"
+            elif name == "Read":
+                agent_data["last_action"] = f"📖 {os.path.basename(inp.get('file_path', ''))}"
+            else:
+                agent_data["last_action"] = f"{icon} {name}"
 
     task.events.append(ev)
     await broadcast({"type": "event", "event": ev, "task": task.to_dict()})
@@ -281,7 +304,10 @@ async def process_task(channel_id, content, message_id, author):
 
             # Mark all running agents as done
             for name in task.agents:
-                if task.agents[name] == "running":
+                agent_data = task.agents[name]
+                if isinstance(agent_data, dict) and agent_data["status"] == "running":
+                    agent_data["status"] = "done"
+                elif agent_data == "running":
                     task.agents[name] = "done"
 
             # Post final result
