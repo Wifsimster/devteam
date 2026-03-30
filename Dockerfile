@@ -14,6 +14,8 @@ RUN /app/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+RUN date -u +'%Y-%m-%dT%H:%M:%SZ' > /app/.build_date
+
 USER node
 
 CMD ["/app/venv/bin/python", "-u", "agent.py"]

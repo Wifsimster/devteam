@@ -741,6 +741,24 @@
   .corner-bl { bottom: -1px; left: -1px; border-bottom: 1px solid var(--cyan-dim); border-left: 1px solid var(--cyan-dim); }
   .corner-br { bottom: -1px; right: -1px; border-bottom: 1px solid var(--cyan-dim); border-right: 1px solid var(--cyan-dim); }
 
+  /* === FOOTER === */
+  .footer {
+    margin-top: 24px;
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-top: 1px solid var(--border);
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+
+  .footer span {
+    opacity: 0.6;
+  }
+
   /* === NOISE TEXTURE === */
   .noise {
     position: fixed;
@@ -865,6 +883,12 @@
       <div class="corner-br"></div>
     </div>
   </div>
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    <span>Jarvis Dev Team v{{VERSION}}</span>
+    <span>Build {{BUILD_DATE}}</span>
+  </footer>
 </div>
 
 <script>

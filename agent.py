@@ -388,8 +388,23 @@ async def handle_ws(request):
     return ws
 
 
+def _read_build_info():
+    base = Path(__file__).parent
+    try:
+        version = (base / "VERSION").read_text().strip()
+    except FileNotFoundError:
+        version = "dev"
+    try:
+        build_date = (base / ".build_date").read_text().strip()
+    except FileNotFoundError:
+        build_date = "unknown"
+    return version, build_date
+
+
 async def handle_dashboard(request):
     html = (Path(__file__).parent / "dashboard.html").read_text()
+    version, build_date = _read_build_info()
+    html = html.replace("{{VERSION}}", version).replace("{{BUILD_DATE}}", build_date)
     return web.Response(text=html, content_type="text/html")
 
 
