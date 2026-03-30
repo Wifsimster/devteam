@@ -1502,7 +1502,7 @@
         <span class="metric-value" id="tokValue">—</span>
       </div>
       <div class="usage-session">
-        Session: <span class="cost" id="sessionCost">$0.00</span> &middot; <span id="sessionTasks">0</span> taches
+        Session: <span class="cost" id="sessionCost">$0.00</span> &middot; <span id="sessionTasks">0</span> tâches
       </div>
       <div class="usage-alert" id="usageAlert"></div>
     </div>
@@ -1515,7 +1515,7 @@
     <!-- AGENTS PANEL (full width) -->
     <div class="panel agents-full">
       <div class="panel-header">
-        <span class="tag">Equipe</span>
+        <span class="tag">Équipe</span>
         <span class="count" id="agentCount">0 actifs</span>
       </div>
       <div class="panel-body" id="agentList">
@@ -1532,14 +1532,14 @@
       <!-- Task Panel -->
       <div class="panel">
         <div class="panel-header">
-          <span class="tag">Tache active</span>
+          <span class="tag">Tâche active</span>
         </div>
         <div class="panel-body" id="taskInfo">
           <div class="empty-state">
             <div class="empty-icon">&#x25C7;</div>
-            <span>Aucune tache</span>
+            <span>Aucune tâche</span>
             <div class="empty-line"></div>
-            <span style="font-size:10px; opacity:0.5">en attente d'instructions</span>
+            <span style="font-size:10px; opacity:0.5">En attente d’instructions</span>
           </div>
         </div>
         <div class="corner-tl"></div>
@@ -1551,15 +1551,15 @@
       <!-- Queue Panel -->
       <div class="panel">
         <div class="panel-header">
-          <span class="tag">File d'attente</span>
+          <span class="tag">File d’attente</span>
           <span class="count" id="queueCount">0 en attente</span>
         </div>
         <div class="panel-body" id="queueList">
           <div class="empty-state">
             <div class="empty-icon">&#x231B;</div>
-            <span>Aucune tache en file</span>
+            <span>Aucune tâche en file</span>
             <div class="empty-line"></div>
-            <span style="font-size:10px; opacity:0.5">les nouvelles taches apparaitront ici</span>
+            <span style="font-size:10px; opacity:0.5">Les nouvelles tâches apparaîtront ici</span>
           </div>
         </div>
         <div class="corner-tl"></div>
@@ -1572,14 +1572,14 @@
       <div class="panel">
         <div class="panel-header">
           <span class="tag">Timeline</span>
-          <span class="count" id="eventCount">0 evenements</span>
+          <span class="count" id="eventCount">0 événements</span>
         </div>
         <div class="timeline-scroll" id="timeline">
           <div class="empty-state">
             <div class="empty-icon">&#x25B7;</div>
-            <span>En attente d'evenements</span>
+            <span>En attente d’événements</span>
             <div class="empty-line"></div>
-            <span style="font-size:10px; opacity:0.5">les actions apparaitront ici</span>
+            <span style="font-size:10px; opacity:0.5">Les actions apparaîtront ici</span>
           </div>
         </div>
         <div class="corner-tl"></div>
@@ -1592,7 +1592,7 @@
       <div class="result-panel" id="resultPanel">
         <div class="panel">
           <div class="panel-header">
-            <span class="tag">Resultat</span>
+            <span class="tag">Résultat</span>
           </div>
           <div class="panel-body">
             <div class="result-body" id="resultText"></div>
@@ -1706,9 +1706,9 @@
           list.innerHTML = `
             <div class="empty-state">
               <div class="empty-icon">&#x231B;</div>
-              <span>Aucune tache en file</span>
+              <span>Aucune t\u00e2che en file</span>
               <div class="empty-line"></div>
-              <span style="font-size:10px; opacity:0.5">les nouvelles taches apparaitront ici</span>
+              <span style="font-size:10px; opacity:0.5">Les nouvelles t\u00e2ches appara\u00eetront ici</span>
             </div>`;
           return;
         }
@@ -1805,7 +1805,7 @@
         if (task.cost_usd) {
           costHtml = `
       <div class="task-field">
-        <span class="label">Cout</span>
+        <span class="label">Coût</span>
         <span class="value highlight">$${task.cost_usd.toFixed(4)} &middot; ${task.num_turns} tours</span>
       </div>`;
         }
@@ -1820,7 +1820,7 @@
       <span class="value">${esc(task.content)}</span>
     </div>
     <div class="task-field">
-      <span class="label">Debut</span>
+      <span class="label">Début</span>
       <span class="value highlight">${task.started_at?.split('T')[1]?.split('.')[0] || '—'}</span>
     </div>
     ${costHtml}
@@ -1835,7 +1835,7 @@
         if (tl.querySelector('.empty-state')) tl.innerHTML = '';
 
         eventCount++;
-        document.getElementById('eventCount').textContent = `${eventCount} evenement${eventCount !== 1 ? 's' : ''}`;
+        document.getElementById('eventCount').textContent = `${eventCount} événement${eventCount !== 1 ? 's' : ''}`;
 
         let iconClass = 'tool';
         let icon = TOOL_ICONS[ev.tool] || '&#9642;';
@@ -1852,7 +1852,7 @@
           else detail = ev.tool;
         }
         else if (ev.type === 'text') detail = esc(ev.text);
-        else if (ev.type === 'result') detail = '<strong>Tache terminee</strong>';
+        else if (ev.type === 'result') detail = '<strong>Tâche terminée</strong>';
 
         // Agent badge
         let agentBadge = '';
@@ -1947,8 +1947,8 @@
         if (status === 'running' || status === 'done') {
           metaHtml = `
       <div class="agent-meta">
-        ${evCount > 0 ? `<div class="agent-meta-row"><span>Evenements</span><span class="meta-value">${evCount}</span></div>` : ''}
-        ${startedAt ? `<div class="agent-meta-row"><span>Duree</span><span class="meta-value agent-timer" data-start="${startedAt}">${formatElapsed(startedAt)}</span></div>` : ''}
+        ${evCount > 0 ? `<div class="agent-meta-row"><span>Événements</span><span class="meta-value">${evCount}</span></div>` : ''}
+        ${startedAt ? `<div class="agent-meta-row"><span>Durée</span><span class="meta-value agent-timer" data-start="${startedAt}">${formatElapsed(startedAt)}</span></div>` : ''}
       </div>
       ${lastAction ? `<div class="agent-last-action">${esc(lastAction)}</div>` : ''}`;
         }
@@ -2143,7 +2143,7 @@
           const data = await resp.json();
           _historyData = data.tasks || [];
           document.getElementById('historyBadge').textContent = data.total || 0;
-          document.getElementById('drawerCount').textContent = `${data.total || 0} taches`;
+          document.getElementById('drawerCount').textContent = `${data.total || 0} tâches`;
           renderHistoryList();
         } catch (e) { /* silent */ }
       }
@@ -2169,9 +2169,9 @@
         if (_historyData.length === 0) {
           el.innerHTML = `<div class="empty-state">
       <div class="empty-icon">&#x25C7;</div>
-      <span>Aucune mission archivee</span>
+      <span>Aucune mission archivée</span>
       <div class="empty-line"></div>
-      <span style="font-size:10px; opacity:0.5">les prochaines taches apparaitront ici</span>
+      <span style="font-size:10px; opacity:0.5">Les prochaines tâches apparaîtront ici</span>
     </div>`;
           return;
         }
@@ -2219,16 +2219,16 @@
         detail.innerHTML = `
     <div class="detail-field"><span class="detail-label">Auteur</span><span class="detail-value">${esc(t.author)}</span></div>
     <div class="detail-field"><span class="detail-label">Statut</span><span class="detail-value">${t.status}</span></div>
-    <div class="detail-field"><span class="detail-label">Debut</span><span class="detail-value">${formatDate(t.started_at)}</span></div>
+    <div class="detail-field"><span class="detail-label">Début</span><span class="detail-value">${formatDate(t.started_at)}</span></div>
     <div class="detail-field"><span class="detail-label">Fin</span><span class="detail-value">${formatDate(t.finished_at)}</span></div>
-    <div class="detail-field"><span class="detail-label">Duree</span><span class="detail-value">${formatDuration(t.duration_s)}</span></div>
-    <div class="detail-field"><span class="detail-label">Cout</span><span class="detail-value" style="color:var(--cyan)">$${(t.cost_usd || 0).toFixed(4)} &middot; ${t.num_turns || 0} tours</span></div>
+    <div class="detail-field"><span class="detail-label">Durée</span><span class="detail-value">${formatDuration(t.duration_s)}</span></div>
+    <div class="detail-field"><span class="detail-label">Coût</span><span class="detail-value" style="color:var(--cyan)">$${(t.cost_usd || 0).toFixed(4)} &middot; ${t.num_turns || 0} tours</span></div>
     <h3>Demande</h3>
     <div class="detail-content">${esc(t.content)}</div>
     <h3>Agents</h3>
     ${agentHtml}
-    <h3>Resultat</h3>
-    <div class="detail-result">${esc(t.result || 'Aucun resultat')}</div>
+    <h3>Résultat</h3>
+    <div class="detail-result">${esc(t.result || 'Aucun résultat')}</div>
   `;
       }
 
