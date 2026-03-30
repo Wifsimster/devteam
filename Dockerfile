@@ -1,7 +1,7 @@
 FROM node:22-slim
 
 RUN apt-get update && \
-    apt-get install -y python3 python3-pip python3-venv git openssh-client && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv git openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code
@@ -9,8 +9,8 @@ RUN npm install -g @anthropic-ai/claude-code
 WORKDIR /app
 
 RUN python3 -m venv /app/venv
-COPY requirements.txt .
-RUN /app/venv/bin/pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements.lock ./
+RUN /app/venv/bin/pip install --no-cache-dir -r requirements.lock
 
 COPY . .
 

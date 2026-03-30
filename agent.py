@@ -9,7 +9,20 @@ from datetime import datetime
 from pathlib import Path
 from itertools import count
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        return json.dumps({
+            "ts": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "msg": record.getMessage(),
+            "logger": record.name,
+        }, ensure_ascii=False)
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 log = logging.getLogger("dev-agents")
 
 DISCORD_BOT_TOKEN = os.environ["DISCORD_BOT_TOKEN"]
@@ -64,8 +77,8 @@ PLANS_FILE = os.path.join(WORKSPACE, ".devteam", "plans.json")
 _http_session = None
 
 # Persistent metrics tracking
-# Daily and monthly breakdown: {user_id: {date: "2026-03-30", day: 5, month: "2026-03", requests: 10, tokens: 50000, ...}, ...}
-_metrics_cache = []
+_metrics_cache = []  # raw list for file persistence
+_metrics_index = {}  # {(user_id, month): {total_requests, total_tokens, daily: {date: {requests, tokens}}}}
 METRICS_FILE = os.path.join(WORKSPACE, ".devteam", "metrics.jsonl")
 QUEUE_FILE = os.path.join(WORKSPACE, ".devteam", "queue.json")
 
@@ -386,6 +399,22 @@ def get_recommended_plan(user_id):
     return True, next_plan, reason
 
 
+def _index_metric(metric):
+    """Add a single metric entry to the in-memory index."""
+    key = (metric.get("user", ""), metric.get("month", ""))
+    if key not in _metrics_index:
+        _metrics_index[key] = {"total_requests": 0, "total_tokens": 0, "daily": {}}
+    idx = _metrics_index[key]
+    idx["total_requests"] += metric.get("requests", 0)
+    idx["total_tokens"] += metric.get("tokens", 0)
+    date = metric.get("date")
+    if date:
+        if date not in idx["daily"]:
+            idx["daily"][date] = {"requests": 0, "tokens": 0}
+        idx["daily"][date]["requests"] += metric.get("requests", 0)
+        idx["daily"][date]["tokens"] += metric.get("tokens", 0)
+
+
 def record_metric(user_id, requests_used, tokens_used):
     """Record daily/monthly metrics for user"""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -402,23 +431,31 @@ def record_metric(user_id, requests_used, tokens_used):
     }
     
     _metrics_cache.append(metric)
+    _index_metric(metric)
     
-    # Persist to file
-    try:
-        os.makedirs(os.path.dirname(METRICS_FILE), exist_ok=True)
-        with open(METRICS_FILE, "a") as f:
-            f.write(json.dumps(metric) + "\n")
-        rotate_jsonl_file(METRICS_FILE)
-    except OSError as e:
-        log.error(f"Failed to write metrics: {e}")
+    # Persist to file (async via executor)
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _write_metric_to_file, metric)
     
     return metric
 
 
+def _write_metric_to_file(metric):
+    """Write a metric to disk (runs in executor thread)."""
+    try:
+        os.makedirs(os.path.dirname(METRICS_FILE), exist_ok=True)
+        with open(METRICS_FILE, "a") as f:
+            f.write(json.dumps(metric) + "\n")
+        _rotate_jsonl_sync(METRICS_FILE)
+    except OSError as e:
+        log.error(f"Failed to write metrics: {e}")
+
+
 def load_metrics():
-    """Load historical metrics from file"""
-    global _metrics_cache
+    """Load historical metrics from file and build index"""
+    global _metrics_cache, _metrics_index
     _metrics_cache = []
+    _metrics_index = {}
     if not os.path.exists(METRICS_FILE):
         return
     try:
@@ -428,7 +465,9 @@ def load_metrics():
                 if not line:
                     continue
                 try:
-                    _metrics_cache.append(json.loads(line))
+                    m = json.loads(line)
+                    _metrics_cache.append(m)
+                    _index_metric(m)
                 except json.JSONDecodeError:
                     continue
         log.info(f"Loaded {len(_metrics_cache)} metrics from history")
@@ -509,30 +548,19 @@ def _load_notifications():
 
 
 def get_user_metrics(user_id, month=None):
-    """Get aggregated metrics for user in a given month"""
+    """Get aggregated metrics for user in a given month (O(1) lookup)"""
     if month is None:
         month = get_current_month()
     
-    total_requests = 0
-    total_tokens = 0
-    daily_breakdown = {}  # {date: {requests, tokens}}
-    
-    for metric in _metrics_cache:
-        if metric.get("user") == user_id and metric.get("month") == month:
-            total_requests += metric.get("requests", 0)
-            total_tokens += metric.get("tokens", 0)
-            
-            date = metric.get("date")
-            if date not in daily_breakdown:
-                daily_breakdown[date] = {"requests": 0, "tokens": 0}
-            daily_breakdown[date]["requests"] += metric.get("requests", 0)
-            daily_breakdown[date]["tokens"] += metric.get("tokens", 0)
+    idx = _metrics_index.get((user_id, month))
+    if not idx:
+        return {"month": month, "total_requests": 0, "total_tokens": 0, "daily_breakdown": {}}
     
     return {
         "month": month,
-        "total_requests": total_requests,
-        "total_tokens": total_tokens,
-        "daily_breakdown": daily_breakdown,
+        "total_requests": idx["total_requests"],
+        "total_tokens": idx["total_tokens"],
+        "daily_breakdown": idx["daily"],
     }
 
 
@@ -541,8 +569,8 @@ def get_user_metrics(user_id, month=None):
 MAX_FILE_ENTRIES = 10_000
 
 
-def rotate_jsonl_file(filepath, max_entries=MAX_FILE_ENTRIES):
-    """Rotate a JSONL file when it exceeds max_entries, keeping the most recent half"""
+def _rotate_jsonl_sync(filepath, max_entries=MAX_FILE_ENTRIES):
+    """Rotate a JSONL file when it exceeds max_entries (blocking I/O, call from executor)."""
     try:
         if not os.path.exists(filepath):
             return
@@ -583,14 +611,20 @@ def load_history():
 def append_history(task):
     entry = task.to_history()
     _history_cache.append(entry)
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _write_history_to_file, entry)
+    return entry
+
+
+def _write_history_to_file(entry):
+    """Write history entry to disk (runs in executor thread)."""
     try:
         os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
         with open(HISTORY_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")
-        rotate_jsonl_file(HISTORY_FILE)
+        _rotate_jsonl_sync(HISTORY_FILE)
     except OSError as e:
         log.error(f"Failed to write history: {e}")
-    return entry
 
 
 # --- Discord Helpers ---
@@ -674,15 +708,15 @@ def split_message(text, limit=1950):
 # --- WebSocket ---
 
 async def broadcast(event):
-    global _current_task, _ws_clients
     msg = json.dumps(event)
-    dead = set()
-    for ws in _ws_clients:
-        try:
-            await ws.send_str(msg)
-        except Exception:
-            dead.add(ws)
-    _ws_clients -= dead
+    if not _ws_clients:
+        return
+    results = await asyncio.gather(
+        *[ws.send_str(msg) for ws in _ws_clients],
+        return_exceptions=True,
+    )
+    dead = {ws for ws, r in zip(_ws_clients, results) if isinstance(r, Exception)}
+    _ws_clients.difference_update(dead)
 
 
 # --- Stream Parser ---
@@ -1053,6 +1087,22 @@ async def handle_health(request):
     })
 
 
+async def handle_ready(request):
+    """Readiness probe: checks Claude CLI is available."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "claude", "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode == 0:
+            return web.json_response({"ready": True, "claude_version": stdout.decode().strip()})
+        return web.json_response({"ready": False, "error": "claude CLI returned non-zero"}, status=503)
+    except (FileNotFoundError, asyncio.TimeoutError) as e:
+        return web.json_response({"ready": False, "error": str(e)}, status=503)
+
+
 async def handle_queue(request):
     async with _queue_lock:
         queue_items = []
@@ -1350,6 +1400,7 @@ app.router.add_post("/task", handle_task)
 app.router.add_post("/task/cancel", handle_cancel_task)
 app.router.add_post("/task/abort", handle_abort)
 app.router.add_get("/health", handle_health)
+app.router.add_get("/ready", handle_ready)
 app.router.add_get("/ws", handle_ws)
 app.router.add_get("/queue", handle_queue)
 app.router.add_get("/history", handle_history)
