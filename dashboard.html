@@ -1670,7 +1670,9 @@
 
       function connect() {
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        ws = new WebSocket(`${proto}//${location.host}/ws`);
+        const wsToken = window.__WS_TOKEN || '';
+        const tokenParam = wsToken ? `?token=${encodeURIComponent(wsToken)}` : '';
+        ws = new WebSocket(`${proto}//${location.host}/ws${tokenParam}`);
 
         ws.onopen = () => {
           document.getElementById('wsDot').classList.add('connected');
