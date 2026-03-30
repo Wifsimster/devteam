@@ -848,6 +848,7 @@ async def run_claude_stream(prompt, task):
     cmd = [
         "claude", "-p", safe_prompt,
         "--output-format", "stream-json",
+        "--verbose",
         "--dangerously-skip-permissions",
         "--model", CLAUDE_MODEL,
         "--max-turns", str(MAX_TURNS),
