@@ -1711,10 +1711,13 @@
             updateTask(data.task);
             showResult(data.task.result);
             break;
-          case 'task_error':
-            setStatus(data.task?.status || 'error', data.task?.status === 'timeout' ? 'Timeout depasse' : 'Erreur detectee');
+          case 'task_error': {
+            const errMsg = data.error_message || data.task?.error_message || '';
+            const statusText = data.task?.status === 'timeout' ? 'Timeout depasse' : 'Erreur detectee';
+            setStatus(data.task?.status || 'error', statusText, errMsg);
             if (data.task) updateTask(data.task);
             break;
+          }
           case 'quota_alert':
             showQuotaAlert(data);
             break;
@@ -1816,13 +1819,16 @@
         }, 10000);
       }
 
-      function setStatus(state, text) {
+      function setStatus(state, text, detail) {
         const beacon = document.getElementById('statusBeacon');
         beacon.className = 'status-beacon ' + state;
         document.getElementById('statusLabel').textContent = text;
 
         const banner = document.getElementById('statusBanner');
         banner.className = 'status-banner ' + state;
+
+        const detailEl = document.getElementById('statusDetail');
+        detailEl.textContent = detail || '';
       }
 
       function updateTask(task) {
@@ -2305,6 +2311,7 @@
     <div class="detail-content">${esc(t.content)}</div>
     <h3>Agents</h3>
     ${agentHtml}
+    ${t.error_message ? `<h3>Erreur</h3><div class="detail-result" style="color:var(--red)">${esc(t.error_message)}</div>` : ''}
     <h3>Résultat</h3>
     <div class="detail-result">${esc(t.result || 'Aucun résultat')}</div>
   `;
@@ -2313,11 +2320,11 @@
       // Load badge count on startup
       loadHistory();
 
-      // Refresh history on task complete
+      // Refresh history on task complete or error
       const _origHandleEvent = handleEvent;
       handleEvent = function (data) {
         _origHandleEvent(data);
-        if (data.type === 'task_complete') {
+        if (data.type === 'task_complete' || data.type === 'task_error') {
           loadHistory();
         }
       };

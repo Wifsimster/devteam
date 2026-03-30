@@ -1,6 +1,7 @@
 import asyncio
 import json
 import hmac
+import traceback
 import aiohttp
 from aiohttp import web
 import os
@@ -241,7 +242,7 @@ async def queue_worker():
             )
             await _broadcast_queue_update()
         except Exception as e:
-            log.error(f"Queue worker error: {e}")
+            log.error(f"Queue worker error: {e}\n{traceback.format_exc()}")
             await asyncio.sleep(1)
 
 
@@ -266,9 +267,10 @@ class TaskState:
         self.output_tokens = 0
         self.proc = None
         self.aborted = False
+        self.error_message = ""
 
     def to_dict(self):
-        return {
+        d = {
             "author": self.author,
             "content": self.content[:300],
             "status": self.status,
@@ -281,12 +283,15 @@ class TaskState:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
         }
+        if self.error_message:
+            d["error_message"] = self.error_message[:500]
+        return d
 
     def to_history(self):
         started = datetime.fromisoformat(self.started_at)
         finished = datetime.now()
         duration_s = int((finished - started).total_seconds())
-        return {
+        d = {
             "author": self.author,
             "content": self.content,
             "status": self.status,
@@ -300,6 +305,9 @@ class TaskState:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
         }
+        if self.error_message:
+            d["error_message"] = self.error_message
+        return d
 
 
 # --- Subscription & Usage Management ---
@@ -994,6 +1002,7 @@ async def process_task(channel_id, content, message_id, author):
         except asyncio.CancelledError:
             typing_task.cancel()
             task.status = "aborted"
+            task.error_message = "Tache annulee par un utilisateur"
             log.info(f"Task aborted for {author}")
             await send_discord(task.thread_id or channel_id, "🛑 Tache annulee par un utilisateur.")
             await broadcast({"type": "task_aborted", "task": task.to_dict()})
@@ -1001,6 +1010,7 @@ async def process_task(channel_id, content, message_id, author):
         except asyncio.TimeoutError:
             typing_task.cancel()
             task.status = "timeout"
+            task.error_message = "Timeout depasse (>15 min)"
             msg = "⚠️ Timeout (>15 min)"
             await send_discord(task.thread_id or channel_id, msg)
             await broadcast({"type": "task_error", "error": "timeout", "task": task.to_dict()})
@@ -1008,9 +1018,11 @@ async def process_task(channel_id, content, message_id, author):
         except Exception as e:
             typing_task.cancel()
             task.status = "error"
-            log.error(f"Task failed: {e}")
-            await send_discord(task.thread_id or channel_id, "❌ Une erreur interne est survenue. Consultez les logs pour plus de details.")
-            await broadcast({"type": "task_error", "error": "internal_error", "task": task.to_dict()})
+            task.error_message = str(e)[:500]
+            log.error(f"Task failed: {e}\n{traceback.format_exc()}")
+            error_detail = str(e)[:200]
+            await send_discord(task.thread_id or channel_id, f"❌ Erreur: {error_detail}")
+            await broadcast({"type": "task_error", "error": "internal_error", "error_message": error_detail, "task": task.to_dict()})
 
         finally:
             if task.status != "running":
