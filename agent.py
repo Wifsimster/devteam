@@ -19,6 +19,10 @@ DISCORD_API = "https://discord.com/api/v10"
 _task_lock = asyncio.Lock()
 _ws_clients = set()
 _current_task = None
+_usage = {"total_cost_usd": 0, "total_turns": 0, "task_count": 0}
+_rate_limits_cache = None
+_rate_limits_ts = 0
+RATE_LIMITS_TTL = 60
 
 
 # --- Task State ---
@@ -322,6 +326,10 @@ async def process_task(channel_id, content, message_id, author):
                 short = result[:300] + ("..." if len(result) > 300 else "")
                 await send_discord(channel_id, f"✅ **Terminee** — voir le thread pour les details.\n{short}", message_id)
 
+            _usage["total_cost_usd"] += task.cost_usd
+            _usage["total_turns"] += task.num_turns
+            _usage["task_count"] += 1
+
             log.info(f"Task done for {author} ({len(result)} chars, ${task.cost_usd:.4f})")
 
         except asyncio.TimeoutError:
@@ -408,12 +416,75 @@ async def handle_dashboard(request):
     return web.Response(text=html, content_type="text/html")
 
 
+def _safe_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def fetch_rate_limits():
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return None
+
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    body = {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "."}],
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.anthropic.com/v1/messages",
+                json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                h = resp.headers
+                return {
+                    "requests_limit": _safe_int(h.get("anthropic-ratelimit-requests-limit")),
+                    "requests_remaining": _safe_int(h.get("anthropic-ratelimit-requests-remaining")),
+                    "requests_reset": h.get("anthropic-ratelimit-requests-reset", ""),
+                    "tokens_limit": _safe_int(h.get("anthropic-ratelimit-tokens-limit")),
+                    "tokens_remaining": _safe_int(h.get("anthropic-ratelimit-tokens-remaining")),
+                    "tokens_reset": h.get("anthropic-ratelimit-tokens-reset", ""),
+                    "input_tokens_limit": _safe_int(h.get("anthropic-ratelimit-input-tokens-limit")),
+                    "input_tokens_remaining": _safe_int(h.get("anthropic-ratelimit-input-tokens-remaining")),
+                    "output_tokens_limit": _safe_int(h.get("anthropic-ratelimit-output-tokens-limit")),
+                    "output_tokens_remaining": _safe_int(h.get("anthropic-ratelimit-output-tokens-remaining")),
+                }
+    except Exception as e:
+        log.error(f"Rate limits fetch failed: {e}")
+        return None
+
+
+async def handle_usage(request):
+    global _rate_limits_cache, _rate_limits_ts
+
+    now = asyncio.get_event_loop().time()
+    if _rate_limits_cache is None or (now - _rate_limits_ts) > RATE_LIMITS_TTL:
+        _rate_limits_cache = await fetch_rate_limits()
+        _rate_limits_ts = now
+
+    return web.json_response({
+        "rate_limits": _rate_limits_cache,
+        "usage": _usage,
+    })
+
+
 # --- App ---
 
 app = web.Application()
 app.router.add_post("/task", handle_task)
 app.router.add_get("/health", handle_health)
 app.router.add_get("/ws", handle_ws)
+app.router.add_get("/usage", handle_usage)
 app.router.add_get("/", handle_dashboard)
 
 if __name__ == "__main__":

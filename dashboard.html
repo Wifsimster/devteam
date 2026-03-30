@@ -741,6 +741,126 @@
   .corner-bl { bottom: -1px; left: -1px; border-bottom: 1px solid var(--cyan-dim); border-left: 1px solid var(--cyan-dim); }
   .corner-br { bottom: -1px; right: -1px; border-bottom: 1px solid var(--cyan-dim); border-right: 1px solid var(--cyan-dim); }
 
+  /* === USAGE BAR === */
+  .usage-bar {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 12px 20px;
+    margin-bottom: 16px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    flex-wrap: wrap;
+  }
+
+  .usage-bar .usage-tag {
+    font-family: var(--font-display);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--cyan);
+    min-width: 30px;
+  }
+
+  .usage-metric {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 200px;
+  }
+
+  .usage-metric .metric-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    min-width: 70px;
+  }
+
+  .usage-progress {
+    flex: 1;
+    height: 6px;
+    background: var(--bg-deep);
+    border-radius: 1px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    min-width: 80px;
+  }
+
+  .usage-progress-fill {
+    height: 100%;
+    border-radius: 1px;
+    transition: width 0.8s ease, background 0.5s;
+    background: var(--green);
+  }
+
+  .usage-progress-fill.warn {
+    background: var(--amber);
+    box-shadow: 0 0 6px var(--amber);
+  }
+
+  .usage-progress-fill.critical {
+    background: var(--red);
+    box-shadow: 0 0 8px var(--red);
+    animation: critical-pulse 1s ease-in-out infinite;
+  }
+
+  @keyframes critical-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  .usage-metric .metric-value {
+    font-size: 10px;
+    color: var(--text);
+    min-width: 55px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .usage-session {
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    margin-left: auto;
+    white-space: nowrap;
+  }
+
+  .usage-session .cost {
+    color: var(--cyan);
+    font-weight: 500;
+  }
+
+  .usage-alert {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin-top: 4px;
+    padding: 6px 12px;
+    font-size: 11px;
+    letter-spacing: 1px;
+    border-radius: 2px;
+    animation: event-in 0.3s ease-out;
+  }
+
+  .usage-alert.warn {
+    display: flex;
+    color: var(--amber);
+    background: #fa00a;
+    border: 1px solid #a803;
+  }
+
+  .usage-alert.critical {
+    display: flex;
+    color: var(--red);
+    background: #f440a;
+    border: 1px solid #a003;
+  }
+
   /* === FOOTER === */
   .footer {
     margin-top: 24px;
@@ -810,6 +930,25 @@
     <div class="status-beacon idle" id="statusBeacon"></div>
     <span class="status-label" id="statusLabel">Systeme en veille</span>
     <span class="status-detail" id="statusDetail"></span>
+  </div>
+
+  <!-- USAGE BAR -->
+  <div class="usage-bar" id="usageBar">
+    <span class="usage-tag">API</span>
+    <div class="usage-metric">
+      <span class="metric-label">Requetes</span>
+      <div class="usage-progress"><div class="usage-progress-fill" id="reqFill" style="width:0%"></div></div>
+      <span class="metric-value" id="reqValue">—</span>
+    </div>
+    <div class="usage-metric">
+      <span class="metric-label">Tokens</span>
+      <div class="usage-progress"><div class="usage-progress-fill" id="tokFill" style="width:0%"></div></div>
+      <span class="metric-value" id="tokValue">—</span>
+    </div>
+    <div class="usage-session">
+      Session: <span class="cost" id="sessionCost">$0.00</span> &middot; <span id="sessionTasks">0</span> taches
+    </div>
+    <div class="usage-alert" id="usageAlert"></div>
   </div>
 
   <!-- AGENTS PANEL (full width) -->
@@ -1212,6 +1351,79 @@ setInterval(() => {
 
 // Initial render: show team in standby
 updateAgents(null);
+
+// --- Usage polling ---
+
+function formatK(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(0) + 'k';
+  return String(n);
+}
+
+function usageClass(pct) {
+  if (pct >= 95) return 'critical';
+  if (pct >= 75) return 'warn';
+  return '';
+}
+
+function updateUsageBar(id, remaining, total) {
+  const fill = document.getElementById(id + 'Fill');
+  const value = document.getElementById(id + 'Value');
+  if (!total) {
+    fill.style.width = '0%';
+    fill.className = 'usage-progress-fill';
+    value.textContent = '—';
+    return 0;
+  }
+  const used = total - remaining;
+  const usedPct = Math.round((used / total) * 100);
+  fill.style.width = usedPct + '%';
+  fill.className = 'usage-progress-fill ' + usageClass(usedPct);
+  value.textContent = formatK(remaining) + '/' + formatK(total);
+  return usedPct;
+}
+
+async function fetchUsage() {
+  try {
+    const resp = await fetch('/usage');
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    const rl = data.rate_limits;
+    const usage = data.usage;
+
+    let maxPct = 0;
+
+    if (rl) {
+      const reqPct = updateUsageBar('req', rl.requests_remaining, rl.requests_limit);
+      const tokPct = updateUsageBar('tok', rl.tokens_remaining, rl.tokens_limit);
+      maxPct = Math.max(reqPct, tokPct);
+    }
+
+    if (usage) {
+      document.getElementById('sessionCost').textContent = '$' + usage.total_cost_usd.toFixed(4);
+      document.getElementById('sessionTasks').textContent = usage.task_count;
+    }
+
+    // Alert
+    const alert = document.getElementById('usageAlert');
+    if (maxPct >= 95) {
+      alert.className = 'usage-alert critical';
+      alert.innerHTML = '&#9888; Rate limit critique — les requetes peuvent etre rejetees';
+    } else if (maxPct >= 75) {
+      alert.className = 'usage-alert warn';
+      alert.innerHTML = '&#9888; Approche de la limite — ralentir les requetes';
+    } else {
+      alert.className = 'usage-alert';
+    }
+  } catch (e) {
+    // silent
+  }
+}
+
+// Poll every 30s, first fetch immediately
+fetchUsage();
+setInterval(fetchUsage, 30000);
 
 connect();
 </script>
