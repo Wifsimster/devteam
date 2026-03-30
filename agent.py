@@ -6,6 +6,7 @@ import os
 import logging
 from datetime import datetime
 from pathlib import Path
+from itertools import count
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("dev-agents")
@@ -65,6 +66,116 @@ METRICS_FILE = os.path.join(WORKSPACE, ".devteam", "metrics.jsonl")
 
 # Upgrade recommendations: {user_id: recommended_plan}
 _upgrade_notifications = {}
+
+# Priority queue for tasks
+PRIORITY_ORDER = {"high": 0, "normal": 1, "low": 2}
+AVG_TASK_SECONDS = int(os.environ.get("AVG_TASK_SECONDS", "120"))
+_task_queue = []
+_queue_lock = asyncio.Lock()
+_queue_seq = count(1)
+_queue_worker_task = None
+
+
+def _normalize_priority(priority):
+    p = (priority or "normal").lower()
+    return p if p in PRIORITY_ORDER else "normal"
+
+
+def _make_task_id():
+    return f"q-{next(_queue_seq)}"
+
+
+def _queue_item_to_dict(item):
+    return {
+        "id": item["id"],
+        "author": item["author"],
+        "content": item["content"][:140],
+        "priority": item["priority"],
+        "status": item["status"],
+        "enqueued_at": item["enqueued_at"],
+        "eta_seconds": item.get("eta_seconds", 0),
+    }
+
+
+async def _broadcast_queue_update():
+    async with _queue_lock:
+        queue_items = []
+        for idx, item in enumerate(_task_queue):
+            queue_copy = dict(item)
+            queue_copy["eta_seconds"] = (idx + 1) * AVG_TASK_SECONDS
+            queue_items.append(_queue_item_to_dict(queue_copy))
+
+    await broadcast({
+        "type": "queue_update",
+        "queue": queue_items,
+        "running": _current_task.to_dict() if _current_task else None,
+        "queue_size": len(queue_items),
+    })
+
+
+async def enqueue_task(channel_id, content, message_id, author, priority):
+    item = {
+        "id": _make_task_id(),
+        "channel_id": channel_id,
+        "content": content,
+        "message_id": message_id,
+        "author": author,
+        "priority": _normalize_priority(priority),
+        "status": "queued",
+        "enqueued_at": datetime.now().isoformat(),
+    }
+
+    async with _queue_lock:
+        _task_queue.append(item)
+        _task_queue.sort(key=lambda x: (PRIORITY_ORDER[x["priority"]], x["enqueued_at"]))
+        position = next((i for i, q in enumerate(_task_queue) if q["id"] == item["id"]), 0) + 1
+
+    await _broadcast_queue_update()
+    return item, position
+
+
+async def dequeue_next_task():
+    async with _queue_lock:
+        if not _task_queue:
+            return None
+        item = _task_queue.pop(0)
+        item["status"] = "running"
+        return item
+
+
+async def cancel_queued_task(task_id):
+    async with _queue_lock:
+        for i, item in enumerate(_task_queue):
+            if item["id"] == task_id:
+                canceled = _task_queue.pop(i)
+                canceled["status"] = "canceled"
+                return canceled
+    return None
+
+
+async def queue_worker():
+    while True:
+        try:
+            if _task_lock.locked() or _current_task is not None:
+                await asyncio.sleep(0.2)
+                continue
+
+            next_item = await dequeue_next_task()
+            if not next_item:
+                await asyncio.sleep(0.3)
+                continue
+
+            await _broadcast_queue_update()
+            await process_task(
+                next_item["channel_id"],
+                next_item["content"],
+                next_item["message_id"],
+                next_item["author"],
+            )
+            await _broadcast_queue_update()
+        except Exception as e:
+            log.error(f"Queue worker error: {e}")
+            await asyncio.sleep(1)
 
 
 # --- Task State ---
@@ -675,20 +786,66 @@ async def handle_task(request):
     content = data["content"]
     message_id = data.get("messageId")
     author = data.get("author", "unknown")
+    priority = data.get("priority", "normal")
 
-    log.info(f"Task from {author}: {content[:80]}")
+    log.info(f"Task from {author} ({priority}): {content[:80]}")
 
-    if _task_lock.locked():
-        await send_discord(channel_id, "⏳ Une tache est deja en cours, patiente.", message_id)
-        return web.Response(status=202, text="busy")
+    item, position = await enqueue_task(channel_id, content, message_id, author, priority)
 
-    asyncio.create_task(process_task(channel_id, content, message_id, author))
-    return web.Response(status=202, text="accepted")
+    eta_s = position * AVG_TASK_SECONDS
+    eta_m = max(1, eta_s // 60)
+    await send_discord(
+        channel_id,
+        f"🧾 Tache en file (priorite: {_normalize_priority(priority)}). Position: {position}, attente estimee: ~{eta_m} min.",
+        message_id,
+    )
+
+    return web.json_response({
+        "status": "queued",
+        "task_id": item["id"],
+        "priority": item["priority"],
+        "position": position,
+        "eta_seconds": eta_s,
+    }, status=202)
 
 
 async def handle_health(request):
     status = "busy" if _task_lock.locked() else "idle"
-    return web.json_response({"status": status, "task": _current_task.to_dict() if _current_task else None})
+    async with _queue_lock:
+        qsize = len(_task_queue)
+    return web.json_response({
+        "status": status,
+        "task": _current_task.to_dict() if _current_task else None,
+        "queue_size": qsize,
+    })
+
+
+async def handle_queue(request):
+    async with _queue_lock:
+        queue_items = []
+        for idx, item in enumerate(_task_queue):
+            queue_copy = dict(item)
+            queue_copy["eta_seconds"] = (idx + 1) * AVG_TASK_SECONDS
+            queue_items.append(_queue_item_to_dict(queue_copy))
+    return web.json_response({
+        "queue": queue_items,
+        "queue_size": len(queue_items),
+        "running": _current_task.to_dict() if _current_task else None,
+    })
+
+
+async def handle_cancel_task(request):
+    data = await request.json()
+    task_id = data.get("task_id")
+    if not task_id:
+        return web.json_response({"error": "task_id required"}, status=400)
+
+    canceled = await cancel_queued_task(task_id)
+    if not canceled:
+        return web.json_response({"error": "task not found or already running"}, status=404)
+
+    await _broadcast_queue_update()
+    return web.json_response({"status": "canceled", "task_id": task_id})
 
 
 async def handle_ws(request):
@@ -702,6 +859,19 @@ async def handle_ws(request):
         await ws.send_str(json.dumps({"type": "task_state", "task": _current_task.to_dict()}))
     else:
         await ws.send_str(json.dumps({"type": "idle"}))
+
+    async with _queue_lock:
+        queue_items = []
+        for idx, item in enumerate(_task_queue):
+            queue_copy = dict(item)
+            queue_copy["eta_seconds"] = (idx + 1) * AVG_TASK_SECONDS
+            queue_items.append(_queue_item_to_dict(queue_copy))
+    await ws.send_str(json.dumps({
+        "type": "queue_update",
+        "queue": queue_items,
+        "running": _current_task.to_dict() if _current_task else None,
+        "queue_size": len(queue_items),
+    }))
 
     try:
         async for msg in ws:
@@ -913,8 +1083,10 @@ async def handle_history(request):
 
 app = web.Application()
 app.router.add_post("/task", handle_task)
+app.router.add_post("/task/cancel", handle_cancel_task)
 app.router.add_get("/health", handle_health)
 app.router.add_get("/ws", handle_ws)
+app.router.add_get("/queue", handle_queue)
 app.router.add_get("/history", handle_history)
 app.router.add_get("/usage", handle_usage)
 app.router.add_get("/plans", handle_plans)
@@ -924,6 +1096,29 @@ app.router.add_get("/", handle_dashboard)
 
 app.router.add_get("/metrics", handle_metrics)
 app.router.add_get("/upgrade-notification", handle_upgrade_notification)
+
+
+async def on_startup(app):
+    global _queue_worker_task
+    if _queue_worker_task is None or _queue_worker_task.done():
+        _queue_worker_task = asyncio.create_task(queue_worker())
+        log.info("Queue worker started")
+
+
+async def on_cleanup(app):
+    global _queue_worker_task
+    if _queue_worker_task and not _queue_worker_task.done():
+        _queue_worker_task.cancel()
+        try:
+            await _queue_worker_task
+        except asyncio.CancelledError:
+            pass
+        log.info("Queue worker stopped")
+
+
+app.on_startup.append(on_startup)
+app.on_cleanup.append(on_cleanup)
+
 if __name__ == "__main__":
     load_history()
     load_metrics()

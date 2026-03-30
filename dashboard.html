@@ -952,6 +952,68 @@
       border: 1px solid #a003;
     }
 
+    /* === QUEUE === */
+    .queue-item {
+      border: 1px solid var(--border);
+      background: var(--bg-panel);
+      padding: 10px;
+      margin-bottom: 8px;
+      border-radius: 2px;
+    }
+
+    .queue-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .queue-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+      font-size: 11px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .queue-priority {
+      padding: 2px 6px;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      color: var(--text-bright);
+      font-size: 10px;
+    }
+
+    .queue-priority.high {
+      border-color: var(--red);
+      color: var(--red);
+    }
+
+    .queue-priority.normal {
+      border-color: var(--cyan-dim);
+      color: var(--cyan);
+    }
+
+    .queue-priority.low {
+      border-color: var(--amber);
+      color: var(--amber);
+    }
+
+    .queue-content {
+      font-size: 12px;
+      color: var(--text);
+      margin-bottom: 6px;
+      line-height: 1.4;
+    }
+
+    .queue-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--text-dim);
+      letter-spacing: 0.5px;
+    }
+
     /* === QUOTA ALERTS (Real-time) === */
     .quota-alert {
       display: flex;
@@ -1486,6 +1548,26 @@
         <div class="corner-br"></div>
       </div>
 
+      <!-- Queue Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="tag">File d'attente</span>
+          <span class="count" id="queueCount">0 en attente</span>
+        </div>
+        <div class="panel-body" id="queueList">
+          <div class="empty-state">
+            <div class="empty-icon">&#x231B;</div>
+            <span>Aucune tache en file</span>
+            <div class="empty-line"></div>
+            <span style="font-size:10px; opacity:0.5">les nouvelles taches apparaitront ici</span>
+          </div>
+        </div>
+        <div class="corner-tl"></div>
+        <div class="corner-tr"></div>
+        <div class="corner-bl"></div>
+        <div class="corner-br"></div>
+      </div>
+
       <!-- Timeline Panel -->
       <div class="panel">
         <div class="panel-header">
@@ -1550,6 +1632,7 @@
       let eventCount = 0;
       let _taskStartedAt = null;
       let _agentTimers = {};
+      let _queueData = [];
 
       // Clock
       function updateClock() {
@@ -1607,6 +1690,55 @@
           case 'quota_alert':
             showQuotaAlert(data);
             break;
+          case 'queue_update':
+            updateQueue(data.queue || []);
+            break;
+        }
+      }
+
+      function updateQueue(queue) {
+        _queueData = Array.isArray(queue) ? queue : [];
+        const list = document.getElementById('queueList');
+        const count = document.getElementById('queueCount');
+        count.textContent = `${_queueData.length} en attente`;
+
+        if (_queueData.length === 0) {
+          list.innerHTML = `
+            <div class="empty-state">
+              <div class="empty-icon">&#x231B;</div>
+              <span>Aucune tache en file</span>
+              <div class="empty-line"></div>
+              <span style="font-size:10px; opacity:0.5">les nouvelles taches apparaitront ici</span>
+            </div>`;
+          return;
+        }
+
+        list.innerHTML = _queueData.slice(0, 8).map((q, idx) => {
+          const etaMin = Math.max(1, Math.ceil((q.eta_seconds || 0) / 60));
+          return `
+            <div class="queue-item">
+              <div class="queue-head">
+                <span>#${idx + 1} • ${esc(q.author || '')}</span>
+                <span class="queue-priority ${esc(q.priority || 'normal')}">${esc((q.priority || 'normal').toUpperCase())}</span>
+              </div>
+              <div class="queue-content">${esc(q.content || '')}</div>
+              <div class="queue-meta">
+                <span>ID ${esc(q.id || '')}</span>
+                <span>ETA ~${etaMin} min</span>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      async function fetchQueue() {
+        try {
+          const resp = await fetch('/queue');
+          if (!resp.ok) return;
+          const data = await resp.json();
+          updateQueue(data.queue || []);
+        } catch (e) {
+          // silent
         }
       }
 
@@ -1979,6 +2111,10 @@
       // Poll every 30s, first fetch immediately
       fetchUsage();
       setInterval(fetchUsage, 30000);
+
+      // Queue polling fallback
+      fetchQueue();
+      setInterval(fetchQueue, 5000);
 
       // --- History drawer ---
 
