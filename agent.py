@@ -160,6 +160,27 @@ def check_user_quota(user_id):
     return allowed, requests_remaining, tokens_remaining
 
 
+def get_user_usage_percentage(user_id):
+    """Get usage percentage for user. Returns (requests_pct, tokens_pct, alert_level)"""
+    plan = get_user_plan(user_id)
+    plan_limits = SUBSCRIPTION_PLANS[plan]
+    usage = get_user_monthly_usage(user_id)
+    
+    requests_pct = (usage["requests"] / plan_limits["requests_limit"] * 100) if plan_limits["requests_limit"] > 0 else 0
+    tokens_pct = (usage["tokens"] / plan_limits["tokens_limit"] * 100) if plan_limits["tokens_limit"] > 0 else 0
+    
+    # Return highest percentage and alert level
+    max_pct = max(requests_pct, tokens_pct)
+    if max_pct >= 95:
+        alert_level = "critical"
+    elif max_pct >= 75:
+        alert_level = "warning"
+    else:
+        alert_level = None
+    
+    return requests_pct, tokens_pct, alert_level, max_pct
+
+
 # --- History ---
 
 def load_history():
@@ -461,6 +482,26 @@ async def process_task(channel_id, content, message_id, author):
 
             # Track usage
             increment_user_usage(author, task.num_turns * 1000)  # Approximate tokens
+            
+            # Send WebSocket alert if quota threshold reached
+            requests_pct, tokens_pct, alert_level, max_pct = get_user_usage_percentage(author)
+            if alert_level:
+                alert_event = {
+                    "type": "quota_alert",
+                    "user": author,
+                    "plan": get_user_plan(author),
+                    "level": alert_level,
+                    "requests_pct": round(requests_pct, 1),
+                    "tokens_pct": round(tokens_pct, 1),
+                    "max_pct": round(max_pct, 1),
+                    "timestamp": datetime.now().isoformat(),
+                }
+                if alert_level == "critical":
+                    alert_event["message"] = f"🚨 CRITIQUE: Vous avez utilisé {max_pct:.0f}% de votre quota mensuel ({get_user_plan(author)})"
+                else:
+                    alert_event["message"] = f"⚠️ ATTENTION: Vous avez utilisé {max_pct:.0f}% de votre quota mensuel ({get_user_plan(author)})"
+                await broadcast(alert_event)
+                log.warning(f"Quota alert for {author}: {alert_level} ({max_pct:.0f}%)")
 
             # Post final result
             target = task.thread_id or channel_id

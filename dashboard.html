@@ -952,6 +952,77 @@
       border: 1px solid #a003;
     }
 
+    /* === QUOTA ALERTS (Real-time) === */
+    .quota-alert {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      font-size: 11px;
+      animation: event-in 0.4s ease-out;
+    }
+
+    .quota-alert.warning {
+      background: #fa000a;
+      border-color: var(--amber);
+      color: var(--amber);
+    }
+
+    .quota-alert.critical {
+      background: #f4000a;
+      border-color: var(--red);
+      color: var(--red);
+      animation: critical-pulse 1s ease-in-out infinite;
+    }
+
+    .quota-alert-header {
+      font-weight: bold;
+      letter-spacing: 1px;
+    }
+
+    .quota-alert-bars {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .quota-alert-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+    }
+
+    .quota-alert-bar-label {
+      min-width: 60px;
+      text-transform: uppercase;
+    }
+
+    .quota-alert-bar-fill {
+      flex: 1;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 1px;
+      overflow: hidden;
+    }
+
+    .quota-alert-bar-progress {
+      height: 100%;
+      background: currentColor;
+      border-radius: 1px;
+      transition: width 0.3s ease;
+    }
+
+    .quota-alert-bar-value {
+      min-width: 35px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
     /* === HISTORY DRAWER === */
     .history-btn {
       display: flex;
@@ -1374,6 +1445,9 @@
       <div class="usage-alert" id="usageAlert"></div>
     </div>
 
+    <!-- QUOTA ALERTS (real-time) -->
+    <div id="quotaAlertsContainer" style="position: fixed; top: 80px; right: 20px; width: 400px; z-index: 1000; max-height: 300px; overflow-y: auto;"></div>
+
     <!-- AGENTS PANEL (full width) -->
     <div class="panel agents-full">
       <div class="panel-header">
@@ -1528,7 +1602,48 @@
             setStatus(data.task?.status || 'error', data.task?.status === 'timeout' ? 'Timeout depasse' : 'Erreur detectee');
             if (data.task) updateTask(data.task);
             break;
+          case 'quota_alert':
+            showQuotaAlert(data);
+            break;
         }
+      }
+
+      function showQuotaAlert(alert) {
+        const container = document.getElementById('quotaAlertsContainer');
+        const div = document.createElement('div');
+        const className = alert.level === 'critical' ? 'critical' : 'warning';
+        
+        const bars = `
+          <div class="quota-alert-bar">
+            <span class="quota-alert-bar-label">Requêtes</span>
+            <div class="quota-alert-bar-fill">
+              <div class="quota-alert-bar-progress" style="width: ${alert.requests_pct}%"></div>
+            </div>
+            <span class="quota-alert-bar-value">${alert.requests_pct.toFixed(0)}%</span>
+          </div>
+          <div class="quota-alert-bar">
+            <span class="quota-alert-bar-label">Tokens</span>
+            <div class="quota-alert-bar-fill">
+              <div class="quota-alert-bar-progress" style="width: ${alert.tokens_pct}%"></div>
+            </div>
+            <span class="quota-alert-bar-value">${alert.tokens_pct.toFixed(0)}%</span>
+          </div>
+        `;
+        
+        div.className = `quota-alert ${className}`;
+        div.innerHTML = `
+          <div class="quota-alert-header">${alert.message}</div>
+          <div class="quota-alert-bars">${bars}</div>
+        `;
+        
+        container.insertBefore(div, container.firstChild);
+        
+        // Auto-remove after 10 seconds
+        setTimeout(() => {
+          div.style.opacity = '0';
+          div.style.transition = 'opacity 0.5s ease-out';
+          setTimeout(() => div.remove(), 500);
+        }, 10000);
       }
 
       function setStatus(state, text) {
