@@ -10,6 +10,8 @@
   <link
     href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Orbitron:wght@400;700;900&display=swap"
     rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.4/dist/purify.min.js"></script>
   <style>
     :root {
       --bg-deep: #050a0e;
@@ -753,13 +755,129 @@
       background: var(--bg-deep);
       border: 1px solid var(--green-dim);
       border-radius: 2px;
-      white-space: pre-wrap;
       max-height: 350px;
       overflow-y: auto;
       line-height: 1.6;
       color: var(--text);
       scrollbar-width: thin;
       scrollbar-color: var(--border) transparent;
+    }
+
+    /* Markdown inside result panels */
+    .result-body h1,
+    .result-body h2,
+    .result-body h3,
+    .result-body h4,
+    .detail-result h1,
+    .detail-result h2,
+    .detail-result h3,
+    .detail-result h4 {
+      color: var(--cyan);
+      margin: 12px 0 6px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .result-body h1,
+    .detail-result h1 {
+      font-size: 16px;
+    }
+
+    .result-body h2,
+    .detail-result h2 {
+      font-size: 14px;
+    }
+
+    .result-body p,
+    .detail-result p {
+      margin: 6px 0;
+    }
+
+    .result-body ul,
+    .result-body ol,
+    .detail-result ul,
+    .detail-result ol {
+      padding-left: 20px;
+      margin: 6px 0;
+    }
+
+    .result-body li,
+    .detail-result li {
+      margin: 3px 0;
+    }
+
+    .result-body code,
+    .detail-result code {
+      background: #1a2a3a;
+      padding: 1px 5px;
+      border-radius: 2px;
+      font-size: 12px;
+      color: var(--green);
+    }
+
+    .result-body pre,
+    .detail-result pre {
+      background: #0a1018;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 10px;
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+
+    .result-body pre code,
+    .detail-result pre code {
+      background: none;
+      padding: 0;
+    }
+
+    .result-body strong,
+    .detail-result strong {
+      color: var(--text-bright);
+    }
+
+    .result-body hr,
+    .detail-result hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 12px 0;
+    }
+
+    .result-body a,
+    .detail-result a {
+      color: var(--cyan);
+      text-decoration: underline;
+    }
+
+    .result-body blockquote,
+    .detail-result blockquote {
+      border-left: 3px solid var(--cyan-dim);
+      padding-left: 12px;
+      margin: 8px 0;
+      color: var(--text-dim);
+    }
+
+    .result-body table,
+    .detail-result table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 8px 0;
+    }
+
+    .result-body th,
+    .result-body td,
+    .detail-result th,
+    .detail-result td {
+      border: 1px solid var(--border);
+      padding: 4px 8px;
+      text-align: left;
+      font-size: 12px;
+    }
+
+    .result-body th,
+    .detail-result th {
+      background: var(--bg-panel);
+      color: var(--cyan);
     }
 
     /* === EMPTY STATE === */
@@ -1369,7 +1487,6 @@
       background: var(--bg-deep);
       border: 1px solid var(--border);
       border-radius: 2px;
-      white-space: pre-wrap;
       max-height: 300px;
       overflow-y: auto;
       font-size: 12px;
@@ -1906,11 +2023,15 @@
         tl.scrollTop = tl.scrollHeight;
       }
 
+      function renderMarkdown(text) {
+        return DOMPurify.sanitize(marked.parse(text || ''));
+      }
+
       function showResult(text) {
         if (!text) return;
         const panel = document.getElementById('resultPanel');
         panel.classList.add('visible');
-        document.getElementById('resultText').textContent = text;
+        document.getElementById('resultText').innerHTML = renderMarkdown(text);
       }
 
       function esc(s) {
@@ -2317,7 +2438,7 @@
     ${agentHtml}
     ${t.error_message ? `<h3>Erreur</h3><div class="detail-result" style="color:var(--red)">${esc(t.error_message)}</div>` : ''}
     <h3>Résultat</h3>
-    <div class="detail-result">${esc(t.result || 'Aucun résultat')}</div>
+    <div class="detail-result">${renderMarkdown(t.result || 'Aucun résultat')}</div>
   `;
       }
 
