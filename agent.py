@@ -2,6 +2,7 @@ import asyncio
 import json
 import hmac
 import traceback
+import uuid
 import aiohttp
 from aiohttp import web
 import os
@@ -82,9 +83,14 @@ _metrics_cache = []  # raw list for file persistence
 _metrics_index = {}  # {(user_id, month): {total_requests, total_tokens, daily: {date: {requests, tokens}}}}
 METRICS_FILE = os.path.join(WORKSPACE, ".devteam", "metrics.jsonl")
 QUEUE_FILE = os.path.join(WORKSPACE, ".devteam", "queue.json")
+SESSIONS_FILE = os.path.join(WORKSPACE, ".devteam", "sessions.json")
 
 # Upgrade recommendations: {user_id: recommended_plan}
 _upgrade_notifications = {}
+
+# Thread session tracking: {thread_id: session_id}
+# Allows follow-up messages in threads to resume the Claude conversation
+_thread_sessions = {}
 
 # Priority queue for tasks
 PRIORITY_ORDER = {"high": 0, "normal": 1, "low": 2}
@@ -133,7 +139,7 @@ async def _broadcast_queue_update():
     })
 
 
-async def enqueue_task(channel_id, content, message_id, author, priority):
+async def enqueue_task(channel_id, content, message_id, author, priority, thread_id=None):
     item = {
         "id": _make_task_id(),
         "channel_id": channel_id,
@@ -144,6 +150,8 @@ async def enqueue_task(channel_id, content, message_id, author, priority):
         "status": "queued",
         "enqueued_at": datetime.now().isoformat(),
     }
+    if thread_id:
+        item["thread_id"] = thread_id
 
     async with _queue_lock:
         _task_queue.append(item)
@@ -213,6 +221,31 @@ def load_queue_state():
         log.error(f"Failed to load queue state: {e}")
 
 
+def save_sessions():
+    """Persist thread->session mapping to disk"""
+    try:
+        os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
+        with open(SESSIONS_FILE, "w") as f:
+            json.dump(_thread_sessions, f)
+    except OSError as e:
+        log.error(f"Failed to save sessions: {e}")
+
+
+def load_sessions():
+    """Load persisted thread->session mapping from disk"""
+    global _thread_sessions
+    if not os.path.exists(SESSIONS_FILE):
+        return
+    try:
+        with open(SESSIONS_FILE, "r") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _thread_sessions = data
+            log.info(f"Loaded {len(_thread_sessions)} thread sessions from disk")
+    except (OSError, json.JSONDecodeError) as e:
+        log.error(f"Failed to load sessions: {e}")
+
+
 async def queue_worker():
     while True:
         try:
@@ -239,6 +272,7 @@ async def queue_worker():
                 next_item["content"],
                 next_item["message_id"],
                 next_item["author"],
+                thread_id=next_item.get("thread_id"),
             )
             await _broadcast_queue_update()
         except Exception as e:
@@ -255,6 +289,7 @@ class TaskState:
         self.author = author
         self.content = content
         self.thread_id = None
+        self.session_id = None
         self.events = []
         self.agents = {}
         self.started_at = datetime.now().isoformat()
@@ -760,6 +795,9 @@ async def parse_stream_line(data, task):
         task.status = "done"
         task.cost_usd = data.get("cost_usd", 0)
         task.num_turns = data.get("num_turns", 0)
+        # Capture session_id from result if available (overrides generated one)
+        if data.get("session_id"):
+            task.session_id = data["session_id"]
         # Override with totals from result if available
         if data.get("total_input_tokens"):
             task.input_tokens = data["total_input_tokens"]
@@ -843,7 +881,7 @@ def sanitize_prompt(text):
     return cleaned[:MAX_CONTENT_LENGTH]
 
 
-async def run_claude_stream(prompt, task):
+async def run_claude_stream(prompt, task, resume_session_id=None):
     safe_prompt = sanitize_prompt(prompt)
     cmd = [
         "claude", "-p", safe_prompt,
@@ -854,7 +892,15 @@ async def run_claude_stream(prompt, task):
         "--max-turns", str(MAX_TURNS),
     ]
 
-    log.info(f"Running claude (stream): {safe_prompt[:80]}...")
+    if resume_session_id:
+        # Resume an existing conversation session
+        cmd.extend(["--resume", resume_session_id])
+        log.info(f"Resuming session {resume_session_id}: {safe_prompt[:80]}...")
+    else:
+        # New conversation: assign a session ID for future follow-ups
+        task.session_id = str(uuid.uuid4())
+        cmd.extend(["--session-id", task.session_id])
+        log.info(f"Running claude (session {task.session_id}): {safe_prompt[:80]}...")
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -900,11 +946,19 @@ async def run_claude_stream(prompt, task):
 
 # --- Task Processor ---
 
-async def process_task(channel_id, content, message_id, author):
+async def process_task(channel_id, content, message_id, author, thread_id=None):
     global _current_task
 
     task = TaskState(channel_id, message_id, author, content)
     _current_task = task
+
+    # Determine if this is a follow-up in an existing thread
+    resume_session_id = None
+    if thread_id and thread_id in _thread_sessions:
+        task.thread_id = thread_id
+        resume_session_id = _thread_sessions[thread_id]
+        task.session_id = resume_session_id
+        log.info(f"Follow-up in thread {thread_id}, resuming session {resume_session_id}")
 
     async with _task_lock:
         # Check user quota before processing
@@ -915,18 +969,22 @@ async def process_task(channel_id, content, message_id, author):
             log.warning(f"Task rejected for {author}: quota exceeded")
             return
 
-        # Create thread
-        thread_name = content[:80] if len(content) <= 80 else content[:77] + "..."
-        task.thread_id = await create_thread(channel_id, message_id, thread_name)
+        if not task.thread_id:
+            # Create thread only for new tasks (not follow-ups)
+            thread_name = content[:80] if len(content) <= 80 else content[:77] + "..."
+            task.thread_id = await create_thread(channel_id, message_id, thread_name)
 
         if task.thread_id:
-            await send_discord(task.thread_id, f"🟢 **Jarvis CEO** demarre l'analyse...\n**Repo workspace :** `{WORKSPACE}`\n**Modele :** `{CLAUDE_MODEL}`")
+            if resume_session_id:
+                await send_discord(task.thread_id, f"🔄 **Jarvis CEO** reprend la conversation...")
+            else:
+                await send_discord(task.thread_id, f"🟢 **Jarvis CEO** demarre l'analyse...\n**Repo workspace :** `{WORKSPACE}`\n**Modele :** `{CLAUDE_MODEL}`")
 
         await broadcast({"type": "task_start", "task": task.to_dict()})
 
         typing_task = asyncio.create_task(keep_typing(task.thread_id or channel_id))
         try:
-            result = await run_claude_stream(content, task)
+            result = await run_claude_stream(content, task, resume_session_id=resume_session_id)
             typing_task.cancel()
 
             # Mark all running agents as done
@@ -989,8 +1047,14 @@ async def process_task(channel_id, content, message_id, author):
                 summary += f"\n\n📊 *{task.num_turns} tours, ${task.cost_usd:.4f}*"
             await send_discord(target, summary, message_id if not task.thread_id else None)
 
+            # Save thread->session mapping for follow-ups
+            if task.thread_id and task.session_id:
+                _thread_sessions[task.thread_id] = task.session_id
+                save_sessions()
+                log.info(f"Session {task.session_id} linked to thread {task.thread_id}")
+
             # Also reply in main channel with short summary
-            if task.thread_id:
+            if task.thread_id and not resume_session_id:
                 short = result[:300] + ("..." if len(result) > 300 else "")
                 await send_discord(channel_id, f"✅ **Terminee** — voir le thread pour les details.\n{short}", message_id)
 
@@ -1060,6 +1124,7 @@ async def handle_task(request):
     message_id = data.get("messageId")
     author = data.get("author", "unknown")
     priority = data.get("priority", "normal")
+    thread_id = data.get("threadId")  # Optional: follow-up in existing thread
 
     if not channel_id or not content:
         return web.json_response({"error": "channelId and content are required"}, status=400)
@@ -1067,17 +1132,21 @@ async def handle_task(request):
         return web.json_response({"error": f"content must be a string of max {MAX_CONTENT_LENGTH} chars"}, status=400)
     if not isinstance(channel_id, str):
         return web.json_response({"error": "channelId must be a string"}, status=400)
+    if thread_id and not isinstance(thread_id, str):
+        return web.json_response({"error": "threadId must be a string"}, status=400)
 
-    log.info(f"Task from {author} ({priority}): {content[:80]}")
+    is_followup = thread_id and thread_id in _thread_sessions
+    log.info(f"Task from {author} ({priority}){' [follow-up]' if is_followup else ''}: {content[:80]}")
 
-    item, position = await enqueue_task(channel_id, content, message_id, author, priority)
+    item, position = await enqueue_task(channel_id, content, message_id, author, priority, thread_id)
 
     eta_s = position * AVG_TASK_SECONDS
     eta_m = max(1, eta_s // 60)
+    notify_channel = thread_id or channel_id
     await send_discord(
-        channel_id,
+        notify_channel,
         f"🧾 Tache en file (priorite: {_normalize_priority(priority)}). Position: {position}, attente estimee: ~{eta_m} min.",
-        message_id,
+        message_id if not thread_id else None,
     )
 
     return web.json_response({
@@ -1086,6 +1155,7 @@ async def handle_task(request):
         "priority": item["priority"],
         "position": position,
         "eta_seconds": eta_s,
+        "is_followup": is_followup,
     }, status=202)
 
 
@@ -1466,6 +1536,7 @@ async def on_cleanup(app):
     _save_usage()
     _save_notifications()
     save_queue_state()
+    save_sessions()
 
     if _queue_worker_task and not _queue_worker_task.done():
         _queue_worker_task.cancel()
@@ -1491,5 +1562,6 @@ if __name__ == "__main__":
     _load_usage()
     _load_notifications()
     load_queue_state()
-    log.info(f"Starting dev-agents (workspace={WORKSPACE}, model={CLAUDE_MODEL}, history={len(_history_cache)} tasks, queue={len(_task_queue)})")
+    load_sessions()
+    log.info(f"Starting dev-agents (workspace={WORKSPACE}, model={CLAUDE_MODEL}, history={len(_history_cache)} tasks, queue={len(_task_queue)}, sessions={len(_thread_sessions)})")
     web.run_app(app, host="0.0.0.0", port=8585)

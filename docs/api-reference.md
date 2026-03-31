@@ -13,7 +13,8 @@ Soumet une nouvelle tâche à l'agent Jarvis.
 | `channelId` | string | oui | Identifiant du canal Discord |
 | `content` | string | oui | Contenu de la demande |
 | `messageId` | string | non | Identifiant du message Discord original |
-| `author` | string | non | Nom de l'auteur (défaut : "unknown") |
+| `author` | string | non | Nom de l'auteur (defaut : "unknown") |
+| `threadId` | string | non | Identifiant du thread Discord pour un suivi de conversation. Si fourni et qu'une session existe pour ce thread, la conversation Claude est reprise avec le contexte precedent. |
 
 **Réponses :**
 

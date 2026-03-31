@@ -25,7 +25,7 @@ prompts/ceo.md    — Prompt système du CEO Jarvis
 
 | Route | Méthode | Description |
 |-------|---------|-------------|
-| `/task` | POST | Soumet une tâche (channelId, content, messageId, author) |
+| `/task` | POST | Soumet une tache (channelId, content, messageId, author, threadId) |
 | `/health` | GET | État du service (idle/busy + tâche en cours) |
 | `/ws` | GET | WebSocket temps réel (événements, agents, timeline) |
 | `/` | GET | Dashboard HTML |
